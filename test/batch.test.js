@@ -60,12 +60,38 @@ test('isMulti：只有 >1 个视频才算多选', function () {
   assert.strictEqual(B.isMulti([item('A', 'mp4'), item('B', 'mov')]), true);
 });
 
-test('确认文案：写明视频数与数量，0 张有专门说明', function () {
+test('totalPlanned：视频数 × 数量，非法值按 0 处理', function () {
+  assert.strictEqual(B.totalPlanned(3, 12), 36);
+  assert.strictEqual(B.totalPlanned(1, 9), 9);
+  assert.strictEqual(B.totalPlanned(5, 0), 0);
+  assert.strictEqual(B.totalPlanned(0, 9), 0);
+  assert.strictEqual(B.totalPlanned(NaN, 9), 0);
+  assert.strictEqual(B.totalPlanned(-2, 9), 0);
+});
+
+test('确认文案：写明视频数、数量与「总共要生成的张数」', function () {
   var msg = B.confirmMessage(3, 12);
   assert.ok(msg.indexOf('3 个视频') >= 0 && msg.indexOf('12') >= 0);
+  assert.ok(msg.indexOf('36 张') >= 0, '弹窗主文本必须写明总张数');
+  assert.ok(B.confirmDetail(3, 12).indexOf('36 张') >= 0);
   assert.ok(B.confirmDetail(3, 12).indexOf('请谨慎修改') >= 0);
+  assert.ok(B.confirmMessage(3, 0).indexOf('0 张') >= 0);
   assert.ok(B.confirmDetail(3, 0).indexOf('不再生成预览图') >= 0);
   assert.ok(B.confirmDetail(3, 0).indexOf('清空') >= 0);
+});
+
+test('bootState：合并上次主题/数量与 settings.json 全局开关，count=0 不算缺失', function () {
+  var d = { theme: 'LIGHT', autoGenerate: false, expanded: false, count: 9 };
+  assert.deepStrictEqual(B.bootState(null, null, d), {
+    theme: 'LIGHT', autoGenerate: false, expanded: false, count: 9
+  });
+  assert.deepStrictEqual(
+    B.bootState({ theme: 'DARK', count: 0 }, { autoGenerate: true, expanded: true }, d),
+    { theme: 'DARK', autoGenerate: true, expanded: true, count: 0 }
+  );
+  assert.strictEqual(B.bootState({ count: 12 }, {}, d).count, 12);
+  assert.strictEqual(B.bootState('bad-json', {}, d).theme, 'LIGHT');
+  assert.strictEqual(B.bootState({ theme: '' }, {}, d).theme, 'LIGHT');
 });
 
 test('summary：包含跳过 / 失败计数', function () {

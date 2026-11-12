@@ -3,6 +3,32 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本。
 
+## [1.3.1] - 2026-11-12
+
+### 新增 · 批量确认弹窗显示总张数
+
+- `Batch.totalPlanned(k, n) = k × n`；弹窗主文本追加「（预计最多生成 X 张预览图）」，detail 写明 `k 个视频 × n 张` 的算法。
+- 明确标注这是**上限**：短视频受 5 秒最低间隔限制、已有符合规则的缓存会跳过，实际生成数可能更少。`n = 0` 时显示 0 张。
+
+### 修复 · 切换素材时先闪出「数量 9 / 生成 / 清空 / 自动生成关」
+
+**成因**：`index.html` 把这些值写成静态默认值，浏览器解析 HTML 后立即渲染；但真实设置要等 `eagle.onPluginCreate` 里的两次异步 IPC（`eagle.app.theme`、`item.getSelected()`）完成才由 `syncControls()` / `tick()` 应用。用户一旦开启了「自动生成」或改过数量，静态默认值与真实状态不一致，每次切换就明显闪一下。`multiSelect: true` 后 Eagle 可能在选中变化时重建检查器 iframe，进一步放大了这个现象。
+
+**修法（首帧同步预填充，不含任何定时器）**：
+
+- `index.html`：删掉 `value="9"`，「生成 / 清空」按钮静态带 `hidden`，`wrap` 加 `booting` 类；`css/style.css` 用 `.wrap.booting { visibility: hidden }` 保证错误默认值不会被画出来（`visibility` 保留布局高度，不跳动）。
+- `main.js` 新增 `bootControls()`，在**脚本解析阶段同步执行**（script 位于 body 末尾，DOM 已就绪、浏览器尚未 paint，且在任何 `await` 之前）：同步读 `settings.json` 拿全局开关，从 `localStorage` 读上次记住的主题 / 数量，调用 `syncControls()` 后移除 `booting`。首帧显示的即是接近真实的设置，而非硬编码默认值。
+- 主题 / 数量在 `onThemeChanged`、单选 `tick()`、数量确认、批量确认时写回 `localStorage`，供下次 iframe 重建使用。
+- `Batch.bootState()` 抽成纯函数做状态合并（全局开关以 `settings.json` 为准；`count = 0` 不能被当成缺失）。
+- `onPluginCreate` 不再重复读文件 / 写控件；拿到异步主题后仅在真的不同时才改 DOM。
+- **边界（如实说明）**：新选中视频自己的数量仍需等异步 `getSelected()` 才能确定，因此若该视频数量与上次记住的不同，输入值会再校正一次；但不会再出现「9 / 生成 / 清空 / 关」这整套错误默认值。
+
+### 单测
+
+- `batch.test.js`：新增 `totalPlanned`（含非法值）与 `bootState`（含 `count = 0`）两组，确认文案加总张数断言 → **9 组**。
+- 新增 `test/boot.test.js` **4 组静态契约回归**：HTML 不含 `value="9"`、按钮与 wrap 默认隐藏、CSS 有 booting 规则、`bootControls()` 必须在 `onPluginCreate` 之前且内部无 `await`、主逻辑仍只有 1 个轮询无新增定时器。
+- `npm test` **39/39** 通过（采样 12 + 布局 9 + 抽帧 5 + 批量 9 + 首帧 4）。
+
 ## [1.3.0] - 2026-11-12
 
 ### 新增 · 多选视频批量修改数量并生成

@@ -1,5 +1,5 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.3.0)
+ * main.js — 检查器区块 UI 与生命周期 (v1.3.1)
  *
  * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
@@ -11,6 +11,10 @@
  *   - 选中 >1 个视频时隐藏所有缩略图、隐藏「生成 / 清空」，提示「请谨慎修改」；
  *   - 数量输入确认后弹窗确认，确认才批量写入各视频配置并生成，取消不改动任何视频；
  *   - 多选时不触发「自动生成」，避免一次选中就批量抽帧。
+ *
+ * 首帧（v1.3.1）：HTML 不再写死「9 / 生成 / 清空 / 关」；bootControls() 在脚本
+ * 解析阶段同步读 settings.json + localStorage 记住的主题 / 数量并预填充控件，
+ * 之后才移除 .booting。切换素材时不会再先闪一下静态默认值。
  *
  * 高度策略（v0.3.1 修复）：
  *   - 只由「操作事件」触发，一个事件只同步刷新一次；没有任何定时器 / 间隔刷新。
@@ -36,6 +40,7 @@
   var SAFE_MARGIN = 4;          // 防裁切的固定余量
   var BATCH_LOCK_KEY = 'pv-grid-batch-lock';
   var BATCH_LOCK_MS = 10000;    // 锁残留最多挡 10 秒，避免实例崩溃后永久不可用
+  var PREF_KEY = 'pv-grid-prefs'; // 上次主题 / 数量，供 iframe 重建后的首帧同步预填充
 
   var state = {
     itemId: null,
@@ -111,6 +116,51 @@
       input.placeholder = '';
       input.value = state.lastCount;
     }
+  }
+
+  /* ---------- 首帧同步预填充（消除切换素材时的默认值闪烁） ---------- */
+
+  function readPrefs() {
+    try {
+      var raw = localStorage.getItem(PREF_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  function writePrefs(patch) {
+    try {
+      var cur = readPrefs() || {};
+      if (patch.theme) cur.theme = patch.theme;
+      if (typeof patch.count === 'number') cur.count = patch.count;
+      localStorage.setItem(PREF_KEY, JSON.stringify(cur));
+    } catch (e) { /* localStorage 不可用时静默跳过 */ }
+  }
+
+  /**
+   * 在脚本解析阶段同步执行（script 位于 body 末尾，DOM 已就绪、浏览器尚未 paint）。
+   * 主题 / 全局开关从 settings.json 同步读，数量用上次记住的值预填；
+   * 全程不发起异步调用，因此首帧就不会再闪出 HTML 里写死的「9 / 生成 / 清空 / 关」。
+   * 真正属于当前选中项的数值仍由 tick() 拿到 getSelected() 后覆盖。
+   */
+  function bootControls() {
+    var globals = null;
+    try { globals = Store.getGlobal(); } catch (e) { /* 用默认值 */ }
+
+    var boot = B.bootState(readPrefs(), globals, {
+      theme: 'LIGHT',
+      autoGenerate: false,
+      expanded: false,
+      count: S.DEFAULT_COUNT
+    });
+
+    document.body.setAttribute('theme', boot.theme);
+    state.global.autoGenerate = boot.autoGenerate;
+    state.global.expanded = boot.expanded;
+    state.lastCount = S.clampCount(boot.count);
+    syncControls();
+
+    var wrap = $('wrap');
+    if (wrap) wrap.classList.remove('booting');
   }
 
   function multiHint() {
@@ -612,6 +662,7 @@
       var cfg = Store.getItemConfig(id);
       state.lastCount = cfg.tileCount;
       syncControls();
+      writePrefs({ count: cfg.tileCount });   // 记住真实数量，供下次首帧预填充
 
       // 该视频设为 0 张：即使「自动生成」开启也跳过，不读缓存、不抽帧。
       if (cfg.tileCount === S.MIN_COUNT) {
@@ -646,18 +697,22 @@
     }
   }
 
+  // 同步首帧预填充：必须在任何 await / IPC 之前完成，避免默认值闪烁
+  bootControls();
+
   eagle.onPluginCreate(async function () {
     try {
       var theme = await eagle.app.theme;
-      document.body.setAttribute('theme', theme || 'LIGHT');
-    } catch (e) { /* 主题取不到时用默认 */ }
+      if (theme) {
+        // boot 已用缓存主题上色，只有真的不同才改 DOM，避免无谓闪烁
+        if (document.body.getAttribute('theme') !== theme) {
+          document.body.setAttribute('theme', theme);
+        }
+        writePrefs({ theme: theme });   // 记住真实主题，供下次 iframe 重建的首帧使用
+      }
+    } catch (e) { /* 沿用 boot 时的缓存主题 */ }
 
-    try {
-      state.global = Store.getGlobal();
-    } catch (e) {
-      setMessage(friendlyError(e), 'error');
-    }
-    syncControls();
+    // 全局设置与控件已在 bootControls() 里同步就绪，这里不再重复读文件 / 写 DOM。
 
     // 固定基准只取一次；之后即使 iframe 尺寸变化也不重新取值
     state.baseViewport = window.innerHeight || DEFAULT_VIEWPORT;
@@ -737,6 +792,7 @@
         }
 
         input.value = bn;
+        writePrefs({ count: bn });       // 批量数量也记住，切回单选时首帧更接近
         await batchApply(snapshot, bn);
         return;
       }
@@ -746,6 +802,7 @@
       input.value = n;
       state.lastCount = n;
       if (!state.itemId) return;
+      writePrefs({ count: n });
 
       // 0 张统一走同一入口：不论「自动生成」开关状态，都立即清缓存并记住该设置，
       // 绝不会因为开关开启而被 generate() 重新生成回来。
@@ -784,6 +841,8 @@
   });
 
   eagle.onThemeChanged(function (theme) {
-    document.body.setAttribute('theme', theme || 'LIGHT');
+    var t = theme || 'LIGHT';
+    document.body.setAttribute('theme', t);
+    writePrefs({ theme: t });
   });
 })();

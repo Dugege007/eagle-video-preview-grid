@@ -57,6 +57,10 @@ body[theme="DARK"] {
   padding: 8px 10px;
 }
 
+/* 首帧同步预填充完成前不显示静态默认值；visibility 保留布局高度，不会跳动。
+   script 在 body 末尾同步执行 bootControls()，通常在浏览器首次 paint 前就已移除。 */
+.wrap.booting { visibility: hidden; }
+
 .toolbar {
   display: flex;
   align-items: center;
