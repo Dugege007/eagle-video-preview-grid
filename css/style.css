@@ -60,16 +60,9 @@ body[theme="DARK"] {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex: none;
-}
-
-.toolbar.secondary { margin-top: 6px; }
-
-.title {
-  font-size: 12px;
-  font-weight: 600;
-  margin-right: auto;
+  flex-wrap: nowrap;   /* 单行：去掉「预览图」label 后所有控件排在一行 */
 }
 
 .spacer { flex: 1; }
@@ -83,7 +76,10 @@ body[theme="DARK"] {
   font-size: 10px;
   cursor: pointer;
   user-select: none;
+  white-space: nowrap;
 }
+
+.switch-label { white-space: nowrap; }
 
 .switch input {
   position: absolute;
@@ -131,6 +127,7 @@ body[theme="DARK"] {
   gap: 4px;
   color: var(--sub);
   font-size: 10px;
+  white-space: nowrap;
 }
 
 input[type="number"] {
@@ -154,8 +151,9 @@ input[type="number"]:focus { outline: 1px solid var(--accent); }
   color: var(--fg);
   font-size: 10px;
   font-family: inherit;
-  padding: 3px 9px;
+  padding: 3px 7px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .btn:hover:not(:disabled) { background: var(--btn-hover); }

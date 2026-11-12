@@ -3,6 +3,33 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本，当前处于 0.x，API 与行为仍可能调整。
 
+## [0.3.2] - 2026-11-12
+
+### 优化 · 拖拽检查器宽度即时刷新
+
+用户实测：v0.3.1 高度已稳定，但「拖拽检查器宽度松开鼠标时不会即时刷新，再点击一次预览图任意位置才触发」。
+成因：拖分隔条时 `mouseup` 发生在 **Eagle 主窗口**，插件 iframe 收不到该事件；只有点在 iframe
+内部才补上一次，而此时宽度早已变化。
+
+- 改用 `ResizeObserver` 观察 `document.documentElement`，捕获「布局宽度变化」这个可靠事件；
+  **只在宽度真的变化时同步刷新一次** `refreshLayout()`。
+- 高度变化（我们自己写 `grid.style.height` 造成的）由宽度守卫直接忽略，
+  不会重演 v0.3.0 的「写入 → 事件 → 再写入」反馈循环。
+- `mouseup` 兜底保留，但与 `ResizeObserver` 共用 `state.lastWidth` 同一基准，因此不会重复刷新。
+- **仍然没有任何定时器 / 防抖 / rAF 二次校准**，符合「事件驱动、一个事件一次」的约定。
+
+### 变更 · 工具栏与栏目名
+
+- 去掉「预览图」label，把「数量 / 生成 / 清空 / 自动生成开关」合并到**同一行**
+  （`flex-wrap: nowrap`、控件加 `white-space: nowrap`、按钮 padding 微调），省掉一行高度。
+- `manifest.name` 由 `Video Preview Grid` 改为 **`视频预览图`**（Eagle 检查器区块标题显示名）；
+  `index.html` 的 `<title>` 同步。插件 `id` 不变，缓存路径不受影响。
+- **明确未改动** `syncControls()` 里「自动生成开启时隐藏生成 / 清空」的显示隐藏逻辑。
+
+### 验证
+
+`npm test` 19/19 通过；全部 JS `node --check`、JSON 校验通过（布局与 DOM 改动不影响纯函数单测）。
+
 ## [0.3.1] - 2026-11-12
 
 ### 修复 · 预览框高度不停逐次递减

@@ -1,5 +1,5 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v0.3.1)
+ * main.js — 检查器区块 UI 与生命周期 (v0.3.2)
  *
  * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
@@ -36,7 +36,8 @@
     global: { autoGenerate: false, expanded: false },
     suppressed: {},                 // itemId -> true
     lastCount: S.DEFAULT_COUNT,
-    baseViewport: DEFAULT_VIEWPORT // 只取一次，之后永不更新
+    baseViewport: DEFAULT_VIEWPORT, // 只取一次，之后永不更新
+    lastWidth: 0                    // 最近一次已知的 iframe 宽度
   };
 
   function $(id) { return document.getElementById(id); }
@@ -392,7 +393,23 @@
 
     // 固定基准只取一次；之后即使 iframe 尺寸变化也不重新取值
     state.baseViewport = window.innerHeight || DEFAULT_VIEWPORT;
-    var lastWidth = window.innerWidth;
+    state.lastWidth = Math.round(window.innerWidth);
+
+    // 拖拽检查器分隔条时，鼠标松开发生在 Eagle 主窗口，插件 iframe 收不到 mouseup，
+    // 所以上一版只能靠「再点一下 iframe 内部」才刷新。改用 ResizeObserver 捕获
+    // 「布局宽度变化」这个可靠事件：只在宽度真的变化时同步刷新一次。
+    // 高度变化（我们自己写 grid 高度导致的）直接忽略，避免写入->事件->再写入的反馈循环。
+    // 无定时器、无防抖、无二次校准。
+    if (typeof ResizeObserver === 'function') {
+      var widthObserver = new ResizeObserver(function (entries) {
+        var rect = entries && entries[0] && entries[0].contentRect;
+        var w = Math.round(rect ? rect.width : window.innerWidth);
+        if (w === state.lastWidth) return;
+        state.lastWidth = w;
+        refreshLayout();
+      });
+      widthObserver.observe(document.documentElement);
+    }
 
     $('generate').addEventListener('click', generate);
     $('clear').addEventListener('click', clearPreview);
@@ -436,12 +453,12 @@
       }
     });
 
-    // 拖拽检查器宽度：只在「鼠标松开」且宽度确实变化时，同步刷新一次。
-    // 不用 resize 防抖、不用 setTimeout、不做二次校准。
+    // iframe 内部点击 / 松开的兜底：与 ResizeObserver 共用同一个宽度基准，
+    // 因此不会重复刷新；宽度没变就一次都不刷。
     window.addEventListener('mouseup', function () {
-      var w = window.innerWidth;
-      if (w === lastWidth) return;
-      lastWidth = w;
+      var w = Math.round(window.innerWidth);
+      if (w === state.lastWidth) return;
+      state.lastWidth = w;
       refreshLayout();
     });
 
