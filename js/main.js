@@ -1,5 +1,5 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v0.3.2)
+ * main.js — 检查器区块 UI 与生命周期 (v1.1.0)
  *
  * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
@@ -155,52 +155,57 @@
     status.className = 'status ' + state.kind;
 
     var grid = $('grid');
-    grid.innerHTML = '';
-
     var meta = state.meta;
     var total = (meta && meta.times) ? meta.times.length : 0;
     var visible = L.visibleCount(total, state.global.expanded);
     var showToggle = L.needsToggle(total);
 
-    if (total === 0) {
-      $('footer').hidden = true;
-      refreshLayout();       // 本次事件的一次刷新
-      return;
-    }
+    // C：渲染签名只在「内容」变化时改变。状态文本更新 / 高度刷新不重建卡片、
+    // 不重复读盘取 base64（store.js 也有一层内存缓存）。
+    var sig = [
+      state.itemId || '',
+      meta ? (meta.generatedAt || 0) : 0,
+      visible,
+      meta && meta.results ? meta.results.join('') : ''
+    ].join('|');
 
-    for (var i = 0; i < visible; i++) {
-      var cell = document.createElement('div');
-      cell.className = 'cell';
+    if (grid.getAttribute('data-sig') !== sig) {
+      grid.innerHTML = '';
+      for (var i = 0; i < visible; i++) {
+        var cell = document.createElement('div');
+        cell.className = 'cell';
 
-      if (meta.results && meta.results[i] === false) {
-        var ph = document.createElement('div');
-        ph.className = 'thumb placeholder';
-        ph.textContent = '抽帧失败';
-        cell.appendChild(ph);
-      } else {
-        var img = document.createElement('img');
-        img.className = 'thumb';
-        img.alt = '';
-        img.title = S.formatTime(meta.times[i]);
-        try {
-          img.src = Store.thumbDataURL(state.itemId, i);
-        } catch (e) {
-          img.classList.add('placeholder');
+        if (meta.results && meta.results[i] === false) {
+          var ph = document.createElement('div');
+          ph.className = 'thumb placeholder';
+          ph.textContent = '抽帧失败';
+          cell.appendChild(ph);
+        } else {
+          var img = document.createElement('img');
+          img.className = 'thumb';
+          img.alt = '';
+          img.title = S.formatTime(meta.times[i]);
+          try {
+            img.src = Store.thumbDataURL(state.itemId, i);
+          } catch (e) {
+            img.classList.add('placeholder');
+          }
+          cell.appendChild(img);
         }
-        cell.appendChild(img);
+
+        var time = document.createElement('div');
+        time.className = 'time';
+        time.textContent = S.formatTime(meta.times[i]);
+        cell.appendChild(time);
+
+        grid.appendChild(cell);
       }
-
-      var time = document.createElement('div');
-      time.className = 'time';
-      time.textContent = S.formatTime(meta.times[i]);
-      cell.appendChild(time);
-
-      grid.appendChild(cell);
+      grid.setAttribute('data-sig', sig);
     }
 
     $('footer').hidden = !showToggle;
     $('toggle').textContent = state.global.expanded ? '收起 ▴' : '展开 ▾';
-    refreshLayout();         // 本次事件的一次刷新
+    refreshLayout();         // 本次事件的一次刷新（内部幂等短路）
   }
 
   async function selectedItem() {

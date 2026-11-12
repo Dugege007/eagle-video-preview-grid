@@ -3,11 +3,33 @@
  *
  * 重要：不用 <video> + canvas。检查器 iframe 与 Eagle 主播放器同属 Chromium 107，
  * 对不被该管线支持的编码一样解不动；FFmpeg 是独立解码链路，必须作为默认通道。
+ *
+ * v1.1.0 性能/防御优化：
+ *   B 缩图 320 -> 192（检查器 3 列每列约 100px，320 是 3 倍冗余）
+ *   D 缓存 getPaths() / isInstalled() 结果，避免每次生成重复 IPC
+ *   E 显式 -accurate_seek，不依赖 FFmpeg 默认行为
+ *   参数构造抽成纯函数 buildCaptureArgs()，便于单测（数组参数，中文路径安全）
  */
 (function (global) {
   'use strict';
 
   var MAX_CONCURRENCY = 2;
+  var THUMB_WIDTH = 192;
+  var cachedPaths = null;   // 插件进程生命周期内不变，无需每次生成重新查询
+
+  /** 单点抽帧参数：纯函数，可单测。-ss 前置 = 输入层快速 seek，只解一个短 GOP。 */
+  function buildCaptureArgs(filePath, t, outPath) {
+    return [
+      '-y',
+      '-accurate_seek',
+      '-ss', String(t),
+      '-i', filePath,
+      '-frames:v', '1',
+      '-vf', 'scale=' + THUMB_WIDTH + ':-2',
+      '-q:v', '3',
+      outPath
+    ];
+  }
 
   function childProcess() {
     if (typeof require !== 'function') throw new Error('NODE_UNAVAILABLE');
@@ -56,6 +78,7 @@
   }
 
   async function ensureFFmpeg() {
+    if (cachedPaths) return cachedPaths;   // D：一次查询，后续复用
     var mod = eagle.extraModule && eagle.extraModule.ffmpeg;
     if (!mod) throw new Error('FFMPEG_MODULE_MISSING');
     if (typeof mod.isInstalled === 'function' && !(await mod.isInstalled())) {
@@ -63,6 +86,7 @@
     }
     var paths = await mod.getPaths();
     if (!paths || !paths.ffmpeg || !paths.ffprobe) throw new Error('FFMPEG_PATHS_MISSING');
+    cachedPaths = paths;
     return paths;
   }
 
@@ -81,19 +105,11 @@
   }
 
   /**
-   * -ss 放在 -i 之前是快速 seek；FFmpeg 的 accurate_seek 默认开启，
-   * 会解码到精确目标点，因此时间码与出图一致（不会落到最近关键帧）。
+   * -ss 放在 -i 之前是快速 seek；显式 -accurate_seek 会解码到精确目标点，
+   * 因此时间码与出图一致（不会落到最近关键帧）。
    */
   async function captureOne(ffmpeg, filePath, t, outPath) {
-    await run(ffmpeg, [
-      '-y',
-      '-ss', String(t),
-      '-i', filePath,
-      '-frames:v', '1',
-      '-vf', 'scale=320:-2',
-      '-q:v', '3',
-      outPath
-    ], 60000);
+    await run(ffmpeg, buildCaptureArgs(filePath, t, outPath), 60000);
   }
 
   async function captureAll(ffmpeg, filePath, times, outPaths, onProgress) {
@@ -125,6 +141,8 @@
 
   var api = {
     MAX_CONCURRENCY: MAX_CONCURRENCY,
+    THUMB_WIDTH: THUMB_WIDTH,
+    buildCaptureArgs: buildCaptureArgs,
     ensureFFmpeg: ensureFFmpeg,
     probeDuration: probeDuration,
     captureOne: captureOne,

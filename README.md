@@ -4,9 +4,9 @@
 
 - **类型**：Eagle 4.0 检查器扩展插件（`preview.<ext>.inspector`），只新增区块，不替换 / 干扰原生视频播放器
 - **Eagle 中显示名**：「视频预览图」（`manifest.name`）
-- **版本**：1.0.0（2026-11-12）
+- **版本**：1.1.0（2026-11-12）
 - **许可**：MIT
-- **状态**：✅ **正式稳定版**，已在真实 Eagle 中连续多轮实测通过；0.x 为开发迭代阶段
+- **状态**：✅ v1.0.0 为首个稳定版（已实测）；**v1.1.0 为性能优化版，待用户回归验证**
 
 ---
 
@@ -137,7 +137,7 @@ t_i  = T - M*gap + (i-1)*gap    // i = 1..M，从尾部往前对齐
 3. 抽帧用精确浮点秒传给 FFmpeg，显示时间码取整秒；数量输入钳制到 1–30。
 4. `-ss` 放在 `-i` 之前是快速 seek，FFmpeg 的 `accurate_seek` 默认开启会解码到精确目标点，时间码与出图一致。
 
-抽帧队列并发上限 2，单张失败显示占位图、不阻塞其他卡片；输出统一 `scale=320:-2` 的 JPEG。
+抽帧队列并发上限 2，单张失败显示占位图、不阻塞其他卡片；输出统一 `scale=192:-2` 的 JPEG（v1.1.0 起：检查器 3 列每列约 100px，192 已约 2 倍冗余，体积约为 320 的 1/3）。显式 `-accurate_seek`，不依赖 FFmpeg 默认行为。
 
 ---
 
@@ -155,7 +155,8 @@ t_i  = T - M*gap + (i-1)*gap    // i = 1..M，从尾部往前对齐
     └── 0.jpg … M-1.jpg
 ```
 
-- `rule`（采样规则版本）、`count`、`sourceSize`、`sourceMtime` 任一变化，或任一缩图缺失 → 缓存失效并重新生成。
+- `rule`（采样 + 输出规格版本）、`count`、`sourceSize`、`sourceMtime` 任一变化，或任一缩图缺失 → 缓存失效并重新生成。v1.1.0 把 `rule` 从 `v1` 升到 `v2`（缩图 320→192），**升级后首次打开会重新抽帧一次**，之后恢复正常。
+- `thumbDataURL()` 结果按 `itemId + index` 缓存在内存；生成 / 清空时按 item 作废，配合 `render()` 的渲染签名复用 DOM，避免重复读盘。
 - 「清空」只删 `*.jpg` 与 `meta.json`，**保留 `config.json`**。
 - **不写 Eagle 资源库、不碰 `metadata.json`**（官方最佳实践明文禁止直接修改资源库文件）。
 - 缩图用 base64 data URL 渲染，规避 Windows 中文路径 / 空格 / `#` 的 `file:///` 转义问题。
@@ -177,6 +178,7 @@ t_i  = T - M*gap + (i-1)*gap    // i = 1..M，从尾部往前对齐
 | v0.3.1 纯事件驱动刷新 / 高度不再递减 | ✅ **用户实测通过** | 2026-11-12 14:06 反馈「目前功能良好」 |
 | 拖拽分隔条时 iframe 能否收到 `mouseup` | ❌ **收不到** | 用户实测：松开不刷新，需再点一次 iframe 内部；事件发生在 Eagle 主窗口 → v0.3.2 改用 `ResizeObserver` 捕获宽度变化 |
 | v0.3.2 单行工具栏 / 拖拽即时刷新 / 中文栏目名 | ✅ **用户实测通过** | 2026-11-12 14:36 反馈「已测试，目前功能良好」 |
+| v1.1.0 性能优化 B/C/D/E | ⏳ **待回归验证** | 新增 5 组抽帧参数单测；需在真实 Eagle 实测缩图清晰度、升级后缓存重建、DOM 复用 |
 | 点击让 Eagle **主播放器**跳到时间点 | ❌ 官方不支持 | `item.open()` 只有 `window` 参数；Plugin API 与本地 HTTP API 均无播放控制 |
 | 全局快捷键抓播放器当前帧 | ❌ 官方不支持 | 拿不到 `currentTime`、iframe 无焦点、7 个 event 无键盘 / 播放器事件 |
 | 改原生标注栏 / 给原生笔记塞图片 | ❌ 插件做不到 | 只能在检查器新增自己的 iframe 区块；`addComment` 无图片字段 |
@@ -187,7 +189,7 @@ t_i  = T - M*gap + (i-1)*gap    // i = 1..M，从尾部往前对齐
 ## 八、开发
 
 ```bash
-npm test                    # node test/sampler.test.js && node test/layout.test.js，无第三方依赖
+npm test                    # sampler + layout + capture 三组单测，无第三方依赖
 python tools/make_logo.py   # 重新生成 logo.png（仅用 Python 标准库）
 ```
 
@@ -202,6 +204,7 @@ python tools/make_logo.py   # 重新生成 logo.png（仅用 Python 标准库）
 ├── js/main.js             # UI、轮询、生成 / 清空 / 自动生成流程
 ├── test/sampler.test.js   # 采样单测
 ├── test/layout.test.js    # 布局单测
+├── test/capture.test.js   # 抽帧参数单测
 ├── tools/make_logo.py     # logo 生成脚本
 └── logo.png               # manifest 图标
 ```
@@ -210,7 +213,7 @@ python tools/make_logo.py   # 重新生成 logo.png（仅用 Python 标准库）
 
 ## 九、路线图（P0 / P1 / P2）
 
-- **P0**：v0.1.0 / v0.2.0 / v0.3.1 已实测通过；v0.3.2 回归验证，重点看「单行工具栏在窄检查器下是否不换行」「拖拽宽度时是否即时刷新」「栏目名是否显示为中文」三项。
+- **P0**：v1.0.0 正式版已实测通过；v1.1.0 回归验证，重点看「192px 缩图在检查器里是否够清晰」「升级后缓存重建一次是否正常」「DOM 复用后切换 / 展开是否仍正确刷新」三项。
 - **P1**：可编辑自定义描述、单张重抽 / 删除、失败重试、单次 FFmpeg 批量 `select` 抽帧优化。
 - **P2**：场景切点检测挑「精彩段」（`select='gt(scene,0.4)'`）、自定义取帧 + 快捷键（仅唤起 / 刷新）、hover 看大图、导出缩图与时间码清单。
 

@@ -3,6 +3,37 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本。
 
+## [1.1.0] - 2026-11-12
+
+基于发布前评审（设计文档 §19）的四项性能优化。**不改采样规则、不改交互、不改高度逻辑**。
+
+### B · 缩图尺寸
+
+- `-vf scale=320:-2` → `scale=192:-2`。检查器 3 列每列约 100px，320 是 3 倍冗余；JPEG 体积 / 编码 / base64 传输约降 4 倍。
+- `Store.RULE_VERSION` 由 `v1` 升到 `v2`（输出规格变化），**升级后首次打开会重新抽帧一次**，之后缓存照常命中。
+
+### C · 减少重复读盘与 DOM 重建
+
+- `store.js` 增加内存 base64 缓存（按 `itemId + index`），`writeMeta()` / `clearItem()` 时按 item 作废。
+- `main.js` 的 `render()` 引入渲染签名（`itemId / generatedAt / visible / results`）：只有内容变化才重建卡片；状态文本更新、高度刷新都复用已有 DOM。
+
+### D · 缓存 FFmpeg 依赖查询结果
+
+- `ensureFFmpeg()` 缓存 `getPaths()` / `isInstalled()` 结果，插件进程内只查一次，每次生成省 2 次 IPC。
+
+### E · 显式 accurate_seek
+
+- 抽帧参数显式加 `-accurate_seek`（默认开启），防 FFmpeg 版本差异；`-ss` 仍前置保持快速 seek。
+
+### 可测试性
+
+- 抽出纯函数 `Capture.buildCaptureArgs()`，新增 `test/capture.test.js` 5 组断言（参数顺序、`scale=192:-2`、`-accurate_seek`、中文 / 空格路径保持数组参数）。
+- `npm test` 扩为三组：**24/24** 通过（采样 11 + 布局 8 + 抽帧 5）。
+
+### 明确未做
+
+批量 `fps` / `select` 抽帧（稀疏点场景负收益，见 §19.3）、一次 ffmpeg 多输入、后台 Service 导入预生成、`image2pipe` 不落盘。
+
 ## [1.0.0] - 2026-11-12
 
 **首个稳定版。** 功能与 0.3.2 完全相同（0.x 为开发迭代阶段），仅做发布收口：

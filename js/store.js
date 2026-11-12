@@ -12,7 +12,21 @@
   'use strict';
 
   var PLUGIN_DIR = 'eagle-video-preview-grid';
-  var RULE_VERSION = 'v1';   // 采样规则版本；算法改动时递增，旧缓存自动失效
+  // v2：输出规格改为缩图宽度 192（v1 为 320）。规格或采样规则变更时递增，旧缓存自动作废重建。
+  var RULE_VERSION = 'v2';
+  var dataURLCache = Object.create(null);   // C：内存缓存 base64，避免每次 render 重复读盘
+
+  function cacheKey(itemId, index) {
+    return safeId(itemId) + ':' + index;
+  }
+
+  /** 图片被替换 / 清空时，作废该视频的全部 base64 缓存。 */
+  function invalidateThumbs(itemId) {
+    var prefix = safeId(itemId) + ':';
+    Object.keys(dataURLCache).forEach(function (k) {
+      if (k.indexOf(prefix) === 0) delete dataURLCache[k];
+    });
+  }
 
   function node() {
     if (typeof require !== 'function') throw new Error('NODE_UNAVAILABLE');
@@ -109,6 +123,7 @@
 
   function writeMeta(itemId, meta) {
     writeJson(metaFile(itemId), meta);
+    invalidateThumbs(itemId);   // 新生成的图片替换旧缓存
   }
 
   function fileStat(filePath) {
@@ -133,10 +148,17 @@
     return true;
   }
 
-  /** 用 base64 data URL，规避 Windows 中文路径 / 空格 / # 的转义问题。 */
+  /**
+   * 用 base64 data URL，规避 Windows 中文路径 / 空格 / # 的转义问题。
+   * C：结果缓存在内存里；render() 复用 DOM 后，同一批图不会再重复读盘。
+   */
   function thumbDataURL(itemId, index) {
+    var k = cacheKey(itemId, index);
+    if (dataURLCache[k]) return dataURLCache[k];
     var buf = node().fs.readFileSync(thumbFile(itemId, index));
-    return 'data:image/jpeg;base64,' + buf.toString('base64');
+    var url = 'data:image/jpeg;base64,' + buf.toString('base64');
+    dataURLCache[k] = url;
+    return url;
   }
 
   /**
@@ -155,6 +177,7 @@
       });
     } catch (e) { /* 目录不存在 */ }
     try { fs.unlinkSync(metaFile(itemId)); } catch (e) { /* 已不存在 */ }
+    invalidateThumbs(itemId);
   }
 
   var api = {
@@ -173,6 +196,7 @@
     fileStat: fileStat,
     isCacheValid: isCacheValid,
     thumbDataURL: thumbDataURL,
+    invalidateThumbs: invalidateThumbs,
     clearItem: clearItem
   };
 
