@@ -11,6 +11,9 @@
  *   M    = min(N, floor(T / gap))
  *   t_i  = T - M*gap + (i-1)*gap      (i = 1..M)
  *
+ *   N = 0 是合法值：该视频不生成预览图（reason = 'zero-count'），
+ *   连时长都不需要读取；用于「全程只有一个画面、有封面就够」的视频。
+ *
  * 该文件同时挂到 window.Sampler（检查器 iframe 用 <script> 加载）
  * 与 module.exports（Node 单测用 require 加载）。
  */
@@ -19,12 +22,19 @@
 
   var MIN_GAP = 5;           // 最低时间间隔，秒
   var DEFAULT_COUNT = 9;     // 自动生成数量默认值
+  var MIN_COUNT = 0;         // 0 = 该视频不生成预览图
   var MAX_COUNT = 30;        // 输入上限，防止误填导致大量 spawn
   var MIN_FIRST_POINT = 1;   // 首点保护阈值：早于 1s 视为片头黑帧
 
+  /**
+   * 合法范围 0–30；空值 / 非数字 / 负数回退默认 9，小数向下取整。
+   * 空字符串必须单独判断：Number('') === 0，否则清空输入框会被误当成「设为 0」。
+   */
   function clampCount(value) {
-    var n = Math.floor(Number(value));
-    if (!isFinite(n) || n < 1) return DEFAULT_COUNT;
+    var raw = (value === undefined || value === null) ? '' : String(value).trim();
+    if (raw === '') return DEFAULT_COUNT;
+    var n = Math.floor(Number(raw));
+    if (!isFinite(n) || n < MIN_COUNT) return DEFAULT_COUNT;
     return Math.min(n, MAX_COUNT);
   }
 
@@ -55,6 +65,13 @@
       droppedFirst: false,
       reason: 'ok'
     };
+
+    // 0 张优先于时长判断：不需要读时长、不需要抽帧，也不产生任何时间点。
+    if (n === MIN_COUNT) {
+      result.reason = 'zero-count';
+      result.gap = 0;
+      return result;
+    }
 
     if (!isFinite(T) || T <= 0) {
       result.reason = 'invalid-duration';
@@ -105,6 +122,7 @@
   var api = {
     MIN_GAP: MIN_GAP,
     DEFAULT_COUNT: DEFAULT_COUNT,
+    MIN_COUNT: MIN_COUNT,
     MAX_COUNT: MAX_COUNT,
     MIN_FIRST_POINT: MIN_FIRST_POINT,
     clampCount: clampCount,

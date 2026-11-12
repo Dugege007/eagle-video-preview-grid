@@ -64,18 +64,40 @@ test('自定义数量：210s / 20 张 -> 10..200s（20 张，第 10 张后折叠
   assert.strictEqual(p.times[19], 200);
 });
 
-test('数量钳制：非法值回退 9，上限 30，小数向下取整', function () {
-  assert.strictEqual(S.clampCount(0), 9);
+test('数量钳制：0 合法，非法值回退 9，上限 30，小数向下取整', function () {
+  assert.strictEqual(S.MIN_COUNT, 0);
+  assert.strictEqual(S.clampCount(0), 0);
+  assert.strictEqual(S.clampCount('0'), 0);
   assert.strictEqual(S.clampCount(-3), 9);
   assert.strictEqual(S.clampCount(NaN), 9);
+  assert.strictEqual(S.clampCount(''), 9);          // 空输入不能当成 0
+  assert.strictEqual(S.clampCount(undefined), 9);
+  assert.strictEqual(S.clampCount(null), 9);
+  assert.strictEqual(S.clampCount('abc'), 9);
   assert.strictEqual(S.clampCount(99), 30);
   assert.strictEqual(S.clampCount(3.7), 3);
-  assert.strictEqual(S.plan(100, 0).requested, 9);
+  assert.strictEqual(S.plan(100, 0).requested, 0);
 });
 
-test('任意输入都满足：相邻间隔 >= 5s、首点 >= 1s、末点 < 时长', function () {
+test('数量设为 0：不生成任何时间点，且优先于时长判断', function () {
+  [100, 28, 4, 0, NaN, -10].forEach(function (T) {
+    var p = S.plan(T, 0);
+    assert.deepStrictEqual(p.times, [], 'T=' + T);
+    assert.strictEqual(p.actual, 0, 'T=' + T);
+    assert.strictEqual(p.requested, 0, 'T=' + T);
+    assert.strictEqual(p.reason, 'zero-count', 'T=' + T);
+    assert.strictEqual(p.truncated, false, 'T=' + T);
+    assert.strictEqual(p.droppedFirst, false, 'T=' + T);
+  });
+});
+
+test('任意输入都满足：相邻间隔 >= 5s、首点 >= 1s、末点 < 时长（含 0 张）', function () {
   for (var T = 1; T <= 600; T += 0.5) {
-    for (var n = 1; n <= 30; n += 1) {
+    for (var n = 0; n <= 30; n += 1) {
+      if (n === 0) {
+        assert.strictEqual(S.plan(T, n).reason, 'zero-count');
+        continue;
+      }
       var p = S.plan(T, n);
       if (p.times.length === 0) continue;
       assert.ok(p.times[0] >= S.MIN_FIRST_POINT, '首点过 early: T=' + T + ' n=' + n);

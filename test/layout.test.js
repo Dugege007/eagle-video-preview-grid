@@ -87,6 +87,17 @@ test('回归：固定基准下反复刷新结果恒定（防止高度逐次递�
   }
 });
 
+test('0 张预览图（数量设为 0）：高度归 0、无展开按钮、展开态也不占高度', function () {
+  assert.strictEqual(L.visibleCount(0, false), 0);
+  assert.strictEqual(L.visibleCount(0, true), 0);
+  assert.strictEqual(L.needsToggle(0), false);
+  assert.strictEqual(L.rowsFor(0, true), 0);
+  assert.deepStrictEqual(
+    L.fitHeight(L.heightFor(0, 60, 8, false), 222),
+    { height: 0, scroll: false }
+  );
+});
+
 var failed = 0;
 cases.forEach(function (c) {
   try {

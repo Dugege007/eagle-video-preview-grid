@@ -1,8 +1,10 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.1.1)
+ * main.js — 检查器区块 UI 与生命周期 (v1.2.0)
  *
  * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
+ *   数量 0 表示该视频不生成预览图：清掉已有缩图、不调用 FFmpeg、网格高度 0。
+ *   改回 1–30 立即恢复，不需要重新选择视频。
  * 内存状态：清空后的「抑制自动生成」标记，重新选择该视频时解除
  *
  * 高度策略（v0.3.1 修复）：
@@ -248,6 +250,13 @@
     var count = S.clampCount($('tileCount').value);
     $('tileCount').value = count;
     state.lastCount = count;
+
+    // 0 张：该视频不生成预览图。连时长都不读，也不触发任何 FFmpeg 进程。
+    if (count === S.MIN_COUNT) {
+      disableForItem();
+      return;
+    }
+
     try { Store.setItemConfig(state.itemId, { tileCount: count }); } catch (e) { /* 不阻塞 */ }
 
     // 已有符合数量 / 规则 / 源文件的缓存 -> 直接复用，不重复抽帧
@@ -345,6 +354,28 @@
     render();
   }
 
+  /**
+   * 数量设为 0：该视频不生成预览图。
+   * 删除已生成的缩图缓存，config.json 写入 0（按视频各自保存），网格高度归 0。
+   * 不调用 ffprobe / ffmpeg，也不写 suppressed —— 数量改回 1–30 可立即恢复生成。
+   */
+  function disableForItem() {
+    var id = state.itemId;
+    try {
+      Store.clearItem(id);                       // 删 jpg + meta.json，保留 config.json
+      Store.setItemConfig(id, { tileCount: 0 });
+    } catch (e) {
+      setMessage(friendlyError(e), 'error');
+      render();
+      return;
+    }
+    state.lastCount = 0;
+    $('tileCount').value = 0;
+    state.meta = null;
+    setMessage('数量设为 0：此视频不生成预览图，仅保留封面；改回 1–30 可恢复', 'hint');
+    render();                                  // 本次事件的一次刷新
+  }
+
   var ticking = false;
   async function tick() {
     if (ticking) return;
@@ -370,6 +401,14 @@
       var cfg = Store.getItemConfig(id);
       state.lastCount = cfg.tileCount;
       syncControls();
+
+      // 该视频设为 0 张：即使「自动生成」开启也跳过，不读缓存、不抽帧。
+      if (cfg.tileCount === S.MIN_COUNT) {
+        state.meta = null;
+        setMessage('此视频已设为 0 张，不生成预览图；把「数量」改为 1–30 可恢复', 'hint');
+        render();          // 重新选择资源：一次刷新
+        return;
+      }
 
       var cached = loadCacheIfValid(item, cfg.tileCount);
       if (cached) {
@@ -455,6 +494,14 @@
       this.value = n;
       state.lastCount = n;
       if (!state.itemId) return;
+
+      // 0 张统一走同一入口：不论「自动生成」开关状态，都立即清缓存并记住该设置，
+      // 绝不会因为开关开启而被 generate() 重新生成回来。
+      if (n === S.MIN_COUNT) {
+        disableForItem();
+        return;
+      }
+
       try { Store.setItemConfig(state.itemId, { tileCount: n }); } catch (e) { /* ignore */ }
 
       if (state.global.autoGenerate && !state.suppressed[state.itemId]) {
