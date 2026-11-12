@@ -26,30 +26,51 @@ test('展开按钮只在超过 9 张时出现', function () {
   assert.strictEqual(L.needsToggle(30), true);
 });
 
-test('行数：0 张 0 行；1-3 张 1 行；4-6 张 2 行；>=7 张封顶 3 行', function () {
-  assert.strictEqual(L.rowsFor(0), 0);
-  assert.strictEqual(L.rowsFor(1), 1);
-  assert.strictEqual(L.rowsFor(3), 1);
-  assert.strictEqual(L.rowsFor(4), 2);
-  assert.strictEqual(L.rowsFor(6), 2);
-  assert.strictEqual(L.rowsFor(7), 3);
-  assert.strictEqual(L.rowsFor(9), 3);
-  assert.strictEqual(L.rowsFor(30), 3);
+test('收起态行数封顶 3 行', function () {
+  assert.strictEqual(L.rowsFor(0, false), 0);
+  assert.strictEqual(L.rowsFor(1, false), 1);
+  assert.strictEqual(L.rowsFor(3, false), 1);
+  assert.strictEqual(L.rowsFor(4, false), 2);
+  assert.strictEqual(L.rowsFor(6, false), 2);
+  assert.strictEqual(L.rowsFor(7, false), 3);
+  assert.strictEqual(L.rowsFor(9, false), 3);
+  assert.strictEqual(L.rowsFor(30, false), 3);
 });
 
-test('高度：0 张为 0；随行数增长；封顶 3 行', function () {
-  assert.strictEqual(L.heightFor(0, 60, 8), 0);
-  assert.strictEqual(L.heightFor(1, 60, 8), 60);
-  assert.strictEqual(L.heightFor(3, 60, 8), 60);
-  assert.strictEqual(L.heightFor(4, 60, 8), 128);
-  assert.strictEqual(L.heightFor(9, 60, 8), 196);
-  assert.strictEqual(L.heightFor(30, 60, 8), 196);
+test('展开态行数不封顶：12 张 4 行、30 张 10 行', function () {
+  assert.strictEqual(L.rowsFor(0, true), 0);
+  assert.strictEqual(L.rowsFor(9, true), 3);
+  assert.strictEqual(L.rowsFor(10, true), 4);
+  assert.strictEqual(L.rowsFor(12, true), 4);
+  assert.strictEqual(L.rowsFor(30, true), 10);
 });
 
-test('任意张数：高度不超过 3 行 + 2 个行间距', function () {
+test('高度：收起封顶 3 行；展开按实际行数变高', function () {
+  assert.strictEqual(L.heightFor(0, 60, 8, false), 0);
+  assert.strictEqual(L.heightFor(1, 60, 8, false), 60);
+  assert.strictEqual(L.heightFor(4, 60, 8, false), 128);
+  assert.strictEqual(L.heightFor(9, 60, 8, false), 196);
+  assert.strictEqual(L.heightFor(30, 60, 8, false), 196);
+  assert.strictEqual(L.heightFor(12, 60, 8, true), 264);   // 4 行
+  assert.strictEqual(L.heightFor(30, 60, 8, true), 672);   // 10 行
+});
+
+test('fitHeight：装得下就直接用目标高度，装不下退回可用高度 + 滚动', function () {
+  assert.deepStrictEqual(L.fitHeight(196, 300), { height: 196, scroll: false });
+  assert.deepStrictEqual(L.fitHeight(300, 300), { height: 300, scroll: false });
+  assert.deepStrictEqual(L.fitHeight(264, 226), { height: 226, scroll: true });
+  assert.deepStrictEqual(L.fitHeight(672, 226), { height: 226, scroll: true });
+  // 拿不到可用高度（0 / NaN）时不强行限制
+  assert.deepStrictEqual(L.fitHeight(672, 0), { height: 672, scroll: false });
+  assert.deepStrictEqual(L.fitHeight(264, NaN), { height: 264, scroll: false });
+});
+
+test('任意张数：收起不超过 3 行高度，展开高度不小于收起高度', function () {
   for (var n = 0; n <= 30; n++) {
-    var h = L.heightFor(n, 60, 8);
-    assert.ok(h >= 0 && h <= 196, 'n=' + n + ' h=' + h);
+    var h = L.heightFor(n, 60, 8, false);
+    var e = L.heightFor(n, 60, 8, true);
+    assert.ok(h >= 0 && h <= 196, '收起高度越界: n=' + n + ' h=' + h);
+    assert.ok(e >= h, '展开高度小于收起高度: n=' + n);
   }
 });
 

@@ -3,6 +3,41 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本，当前处于 0.x，API 与行为仍可能调整。
 
+## [0.3.0] - 2026-11-12
+
+### 新增 · 按需刷新高度（逼近「自适应」）
+
+官方仍无运行时修改检查器 iframe 高度的 API，因此把「刷新高度」做成幂等的
+`refreshLayout()`，挂到所有关键时机，用反复重算来逼近自适应：
+
+- **展开时行数不再封顶 3 行**：按实际张数计算目标高度（12 张 → 4 行，30 张 → 10 行），
+  收起时回到 3 行。解决「展开后还要在预览图框里滚轮才能看到 9 张之后」。
+- **刷新时机**：初始化、重新选择资源、生成完成、清空、展开 / 收起、数量确认、
+  `resize`（拖拽检查器宽度）、`mouseup`（松开后）、1s 轮询检测到 `innerHeight` 变化，
+  以及 rAF + 120ms / 400ms 两段延时二次校准（对抗宿主重排）。
+- **防裁切保护**：`Layout.fitHeight()` 在目标高度超过 iframe 可用视口高度时，
+  自动退回「占满可用高度 + 内部滚动」，保证内容不会被宿主裁掉而凭空消失。
+- **宿主同步增强**：`tryResizeHost()` 同时尝试 `frameElement` 的 `style.height` /
+  `minHeight` / `height` 属性，以及宿主 document 里承载本窗口的 `iframe` / `webview` 元素。
+- 新增只读 `probeHost()`，在 DevTools 输出 `eagle.window.getSize()` 等诊断信息，
+  **不调用 `setSize`**（避免误改 Eagle 主窗口尺寸）。
+
+### 变更
+
+- 「清空」按钮改为红色（`.btn.danger`）。
+- 启用「自动生成」时，「清空」按钮与「生成」按钮一起隐藏。
+
+### 单测
+
+- `layout.js` 的 `rowsFor` / `heightFor` 增加 `expanded` 参数；新增 `fitHeight`。
+- `test/layout.test.js` 扩到 7 组，`npm test` 共 18/18 通过（采样 11 + 布局 7）。
+
+### 已知边界
+
+外框能否真正变高仍取决于 Eagle 宿主：若 `frameElement` / `parent.document` 都不可访问，
+manifest 的 `height` 仍是固定值；此时展开超过外框容纳能力的部分会按防裁切保护退回内部滚动，
+而不是被裁掉。后续可依据 DevTools 里的 `probeHost` 输出评估是否启用 `eagle.window.setSize` 通道。
+
 ## [0.2.0] - 2026-11-12
 
 ### 新增

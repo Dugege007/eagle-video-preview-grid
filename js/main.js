@@ -1,9 +1,13 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v0.2.0)
+ * main.js — 检查器区块 UI 与生命周期 (v0.3.0)
  *
  * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
  * 内存状态：清空后的「抑制自动生成」标记，重新选择该视频时解除
+ *
+ * 高度策略：官方没有运行时改检查器 iframe 高度的 API，因此把「刷新高度」
+ * 做成幂等的 refreshLayout()，挂到所有关键时机；展开时行数不封顶，
+ * 并做防裁切保护（超出 iframe 可用高度时退回内部滚动）。
  *
  * 明确不做：点击跳转播放、快捷键、自定义取帧、可编辑描述、hover 播放。
  */
@@ -23,7 +27,8 @@
     kind: 'hint',
     global: { autoGenerate: false, expanded: false },
     suppressed: {},                 // itemId -> true
-    lastCount: S.DEFAULT_COUNT
+    lastCount: S.DEFAULT_COUNT,
+    lastInnerHeight: 0
   };
 
   function $(id) { return document.getElementById(id); }
@@ -70,7 +75,9 @@
 
   function syncControls() {
     $('autoGenerate').checked = state.global.autoGenerate;
-    $('generate').hidden = state.global.autoGenerate;   // 自动生成开启时隐藏手动按钮
+    // 自动生成开启时：手动「生成」与「清空」都隐藏
+    $('generate').hidden = state.global.autoGenerate;
+    $('clear').hidden = state.global.autoGenerate;
     $('tileCount').value = state.lastCount;
   }
 
@@ -91,40 +98,109 @@
   }
 
   /**
-   * 网格高度随张数变化：0 张 -> 0；1-3 张 -> 1 行；4-6 -> 2 行；>=7 -> 3 行封顶。
-   * 行高用运行时实测的 cell 高度，避免硬编码缩图尺寸。
+   * 尽力而为地同步宿主 iframe 高度（官方无对应 API）。
+   * 多路尝试：frameElement 的 style / height 属性、宿主 document 里承载本窗口的
+   * iframe / webview 元素。全部包在 try/catch 里，宿主不允许就静默退回固定高度。
    */
-  function applyGridHeight(n) {
-    var grid = $('grid');
-    if (n <= 0) {
-      grid.style.height = '0px';
-      grid.style.marginTop = '0px';
-      grid.style.overflowY = 'hidden';
-    } else {
-      var cell = grid.querySelector('.cell');
-      var cellH = cell ? cell.getBoundingClientRect().height : 0;
-      var gap = parseFloat(window.getComputedStyle(grid).rowGap) || 8;
-      grid.style.height = L.heightFor(n, cellH, gap) + 'px';
-      grid.style.marginTop = '6px';
-      // 展开态（>9 张）保持 3 行高度，其余卡片在网格内部滚动
-      grid.style.overflowY = (n > L.VISIBLE_LIMIT) ? 'auto' : 'hidden';
+  function tryResizeHost(h) {
+    if (!h || h < 20) return false;
+    var px = Math.ceil(h) + 'px';
+    var ok = false;
+    try {
+      var fe = window.frameElement;
+      if (fe) {
+        if (fe.style) {
+          fe.style.height = px;
+          fe.style.minHeight = px;
+        }
+        try { fe.setAttribute('height', String(Math.ceil(h))); } catch (e) { /* ignore */ }
+        ok = true;
+      }
+    } catch (e) { /* 跨域 / webview */ }
+
+    try {
+      if (window.parent && window.parent !== window) {
+        var list = window.parent.document.querySelectorAll('iframe,webview');
+        for (var i = 0; i < list.length; i++) {
+          try {
+            if (list[i].contentWindow === window) {
+              list[i].style.height = px;
+              list[i].style.minHeight = px;
+              ok = true;
+              break;
+            }
+          } catch (e2) { /* 单个元素无权限 */ }
+        }
+      }
+    } catch (e3) { /* 宿主文档不可访问 */ }
+
+    return ok;
+  }
+
+  /** 只读探测：判断 eagle.window 是否指向可控的检查器窗口（不调用 setSize）。 */
+  async function probeHost() {
+    try {
+      var size = (eagle.window && typeof eagle.window.getSize === 'function')
+        ? await eagle.window.getSize()
+        : null;
+      var w = size && size[0];
+      var h = size && size[1];
+      console.log('[pv-grid] host probe', {
+        frameElement: !!window.frameElement,
+        innerHeight: window.innerHeight,
+        windowGetSize: size,
+        looksLikeInspectorWindow: !!(w && h && w <= 600 && h <= 1200)
+      });
+    } catch (e) {
+      console.log('[pv-grid] host probe unavailable:', e && e.message);
     }
-    tryResizeHost();
   }
 
   /**
-   * 尽力而为地同步宿主 iframe 高度。
-   * 官方没有「运行时修改检查器区块高度」的 API（eagle.window.setSize 只作用于
-   * 插件窗口，检查器插件没有 main）。若宿主是同源 iframe，frameElement 可直接改；
-   * 若是 webview / 不允许访问，则静默退回 manifest 固定高度，内容仍顶部对齐。
+   * 幂等的高度刷新：按当前 DOM 里的卡片数、实测行高、展开状态、
+   * 以及 iframe 当前可用视口高度，重新计算网格高度。
+   * 这是「自适应」的核心动作，可在任意操作之后重复调用。
    */
-  function tryResizeHost() {
-    try {
-      var h = $('wrap').getBoundingClientRect().height;
-      if (!h || h < 20) return;
-      var fe = window.frameElement;
-      if (fe && fe.style) fe.style.height = Math.ceil(h) + 'px';
-    } catch (e) { /* 宿主不允许访问，静默 */ }
+  function refreshLayout() {
+    var grid = $('grid');
+    var cells = grid.querySelectorAll('.cell');
+    var n = cells.length;
+
+    if (n === 0) {
+      grid.style.height = '0px';
+      grid.style.marginTop = '0px';
+      grid.style.overflowY = 'hidden';
+      tryResizeHost($('wrap').getBoundingClientRect().height);
+      return;
+    }
+
+    var cellH = cells[0].getBoundingClientRect().height;
+    var gap = parseFloat(window.getComputedStyle(grid).rowGap) || 8;
+    var target = L.heightFor(n, cellH, gap, state.global.expanded);
+
+    // 除网格外的固定开销（工具栏 / 状态行 / footer / padding）
+    var wrapH = $('wrap').getBoundingClientRect().height;
+    var gridH = grid.getBoundingClientRect().height;
+    var chrome = Math.max(0, wrapH - gridH);
+    var avail = Math.max(0, window.innerHeight - chrome - 4);
+    var fit = L.fitHeight(target, avail);
+
+    grid.style.marginTop = '6px';
+    grid.style.height = fit.height + 'px';
+    grid.style.overflowY = fit.scroll ? 'auto' : 'hidden';
+
+    tryResizeHost(Math.ceil($('wrap').getBoundingClientRect().height));
+  }
+
+  var refreshTimerA = null;
+  var refreshTimerB = null;
+  /** 对抗宿主重排：rAF + 两段延时各刷一次。带防抖，进度更新不会堆积。 */
+  function scheduleRefresh() {
+    if (window.requestAnimationFrame) window.requestAnimationFrame(refreshLayout);
+    clearTimeout(refreshTimerA);
+    clearTimeout(refreshTimerB);
+    refreshTimerA = setTimeout(refreshLayout, 120);
+    refreshTimerB = setTimeout(refreshLayout, 400);
   }
 
   function render() {
@@ -142,7 +218,8 @@
 
     if (total === 0) {
       $('footer').hidden = true;
-      applyGridHeight(0);
+      refreshLayout();
+      scheduleRefresh();
       return;
     }
 
@@ -178,7 +255,8 @@
 
     $('footer').hidden = !showToggle;
     $('toggle').textContent = state.global.expanded ? '收起 ▴' : '展开 ▾';
-    applyGridHeight(visible);
+    refreshLayout();
+    scheduleRefresh();
   }
 
   async function selectedItem() {
@@ -296,7 +374,6 @@
       render();
       return;
     }
-    // 抑制自动生成：只有重新选择该视频（选中项 id 再次变化）才解除
     state.suppressed[state.itemId] = true;
     state.meta = null;
     setMessage(
@@ -311,6 +388,13 @@
     if (ticking) return;
     ticking = true;
     try {
+      // 宿主高度若被撑高 / 检查器宽度变化，轮询里也能感知并重算
+      var ih = window.innerHeight;
+      if (ih !== state.lastInnerHeight) {
+        state.lastInnerHeight = ih;
+        refreshLayout();
+      }
+
       // 官方 7 个 event 中没有「选中项变化」，只能轮询
       var item = await selectedItem();
       var id = item ? item.id : null;
@@ -336,6 +420,7 @@
         state.meta = cached;
         setMessage(describe(), 'hint');
         render();
+        scheduleRefresh();   // 重新选择资源后刷新高度
         return;
       }
 
@@ -346,6 +431,7 @@
         setMessage('尚未生成预览图，点「生成」按钮自动生成', 'hint');
         render();
       }
+      scheduleRefresh();     // 重新选择资源后刷新高度
       // 注意：state.global.expanded 是全局的，切换视频不重置
     } catch (e) {
       state.meta = null;
@@ -363,11 +449,13 @@
     } catch (e) { /* 主题取不到时用默认 */ }
 
     try {
-      state.global = Store.getGlobal();   // 自动生成默认关闭、展开状态全局保持
+      state.global = Store.getGlobal();
     } catch (e) {
       setMessage(friendlyError(e), 'error');
     }
     syncControls();
+    state.lastInnerHeight = window.innerHeight;
+    probeHost();
 
     $('generate').addEventListener('click', generate);
     $('clear').addEventListener('click', clearPreview);
@@ -376,7 +464,6 @@
       state.global.autoGenerate = !!this.checked;
       try { Store.setGlobal({ autoGenerate: state.global.autoGenerate }); } catch (e) { /* ignore */ }
       syncControls();
-      // 按用户口径：开启当下不立即生成，等下一次「点击选择视频」时触发
       setMessage(
         state.global.autoGenerate ? '自动生成已开启：选择视频时自动生成' : '自动生成已关闭',
         'hint'
@@ -389,6 +476,7 @@
       try { Store.setGlobal({ expanded: state.global.expanded }); } catch (e) { /* ignore */ }
       setMessage(describe(), 'hint');
       render();
+      scheduleRefresh();   // 展开 / 收起后按当前张数刷新高度
     });
 
     $('tileCount').addEventListener('change', function () {
@@ -399,7 +487,7 @@
       try { Store.setItemConfig(state.itemId, { tileCount: n }); } catch (e) { /* ignore */ }
 
       if (state.global.autoGenerate && !state.suppressed[state.itemId]) {
-        generate();   // 数量确认后自动刷新（generate 内部会先查缓存）
+        generate();
       } else {
         state.meta = null;
         setMessage(
@@ -410,6 +498,18 @@
         );
         render();
       }
+      scheduleRefresh();   // 重设数量后刷新高度
+    });
+
+    // 拖拽检查器宽度：iframe 尺寸变化会触发 resize；mouseup 兜底「松开后」再刷一次
+    var resizeTimer = null;
+    window.addEventListener('resize', function () {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(refreshLayout, 120);
+    });
+    window.addEventListener('mouseup', function () {
+      setTimeout(refreshLayout, 60);
+      setTimeout(refreshLayout, 220);
     });
 
     await tick();

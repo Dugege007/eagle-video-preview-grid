@@ -28,6 +28,7 @@ body[theme="LIGHTGRAY"] {
   --btn-hover: #e8eaee;
   --accent: #2f6feb;
   --placeholder: #f0f1f3;
+  --danger: #d84554;
 }
 
 body[theme="GRAY"],
@@ -42,6 +43,7 @@ body[theme="DARK"] {
   --btn-hover: #363c49;
   --accent: #5b8cff;
   --placeholder: #282d36;
+  --danger: #e05561;
 }
 
 [hidden] { display: none !important; }
@@ -166,6 +168,15 @@ input[type="number"]:focus { outline: 1px solid var(--accent); }
 }
 
 .btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* 清空是破坏性操作，用红色区分 */
+.btn.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.btn.danger:hover:not(:disabled) { filter: brightness(1.1); }
 
 .btn.link {
   background: transparent;
