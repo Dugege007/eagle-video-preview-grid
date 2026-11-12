@@ -6,7 +6,8 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body theme="LIGHT">
-  <!-- booting：脚本解析时同步预填充真实设置后才移除，避免首帧闪出静态默认值 -->
+  <!-- booting：等 onPluginCreate 同步读完 settings.json 并应用控件后才移除，
+       避免首帧闪出静态默认值；全局开关仍由 Eagle 保证 API 就绪后的 onPluginCreate 读取。 -->
   <div class="wrap booting" id="wrap">
     <div class="toolbar">
       <label class="count">数量
@@ -30,22 +31,8 @@
     </div>
   </div>
 
-  <!-- eagle.dialog 在检查器环境不可用时的兜底确认框（纯 DOM，不依赖宿主 API） -->
-  <div id="confirm" class="modal" hidden>
-    <div class="modal-box">
-      <div id="confirmTitle" class="modal-title">批量修改确认</div>
-      <div id="confirmMessage" class="modal-message"></div>
-      <div id="confirmDetail" class="modal-detail"></div>
-      <div class="modal-actions">
-        <button id="confirmCancel" class="btn" type="button">取消</button>
-        <button id="confirmOk" class="btn primary" type="button">确认</button>
-      </div>
-    </div>
-  </div>
-
   <script src="js/sampler.js"></script>
   <script src="js/layout.js"></script>
-  <script src="js/batch.js"></script>
   <script src="js/store.js"></script>
   <script src="js/capture.js"></script>
   <script src="js/main.js"></script>

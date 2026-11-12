@@ -3,6 +3,33 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本。
 
+## [1.4.0] - 2026-11-12
+
+### 回退 · 移除多选批量设置，恢复单选稳态
+
+用户实测 v1.3.1 后报告回归：「自动生成」「展开 / 折叠」不再全局保持，每次切换视频都回到默认关闭 / 收起；展开后高度不刷新；并出现卡帧，判断从多选批量功能之后才有。设计文档 §15.5 的既定口径是 **「开关 / 展开折叠为全局，切换视频保持；生成数量按视频独立」**，本次回归与之相违背。
+
+**诊断结论：是批量设置这一串改动引起的**
+
+1. **确定缺陷**：v1.3.1 的 `bootControls()` 把 `Store.getGlobal()` 提前到脚本解析阶段。此时 `eagle.app.userDataPath` 可能尚未就绪，`path.join` 抛错被 `catch` 静默吞掉；同时 `onPluginCreate` 里原本的兜底重读被删除。全局开关 / 展开状态因此回退成默认 `false / false`，之后没有任何代码再纠正。
+2. **展开高度**：`refreshLayout()` 用 `state.global.expanded` 决定 `Layout.heightFor()` 是否封顶 3 行；状态丢失后展开态被按收起态计算，表现为「展开后没刷新高度」。
+3. **卡帧 / 每次切换都重置**：`multiSelect: true` 是 v1.3.0 为批量功能引入的 manifest 变更。官方只说明它控制「多选时是否显示」，未说明检查器 iframe 的生命周期；若 Eagle 在选中变化时重建 iframe，每次重建都会重复 ① 并带来重绘开销。这一条为**推断**（官方无明文），但与「每次切换都默认关闭」「卡帧从批量功能后才有」高度吻合，且回退 `multiSelect: false` 可直接验证。
+
+**执行**（按用户授权「可以去掉批量设置、恢复到以前的样子；设计思路保留备份」）：
+
+- 运行时整体回退到 **v1.2.0**（连续多轮真实 Eagle 实测通过的版本）：`multiSelect` 回到 `false`，删除 `js/batch.js`、多选状态机、批量确认弹窗、跨实例去重、首帧 `localStorage` 预填充及其单测（`test/batch.test.js` / `test/boot.test.js`）。
+- 单选路径（生成 / 清空 / 0 张 / 自动生成 / 展开折叠 / 事件驱动高度 / 全局与单项状态作用域）恢复为 v1.2.0 原样，**全局设置重新由 `onPluginCreate` 读取**。
+- 只保留一个无副作用改动：HTML 去掉静态 `value="9"`、按钮默认 `hidden`、`wrap` 加 `booting`；CSS `.wrap.booting { visibility: hidden }`；`onPluginCreate` 在同步 `Store.getGlobal()` + `syncControls()` **之后**才移除 `booting`，随后才 `await` 主题。首帧不再闪出整套错误默认值，且全局状态 100% 来自 `settings.json`。
+- **设计备份**：云端 tag `v1.3.1`、本地分支 `archive/batch-multiselect`、工作空间 `批量设置功能_设计备份.md` 完整保留需求、官方依据、实现与踩坑；以后找到方案可直接恢复。
+
+### 已知边界（如实说明）
+
+新选中视频**自己**的数量仍需等异步 `item.getSelected()` 才能确定；若与默认 9 不同，输入框会在该视频加载完成后校正一次。这是官方异步接口所致，不影响开关与展开状态的全局保持。
+
+### 验证
+
+`npm test` **26/26** 通过（采样 12 + 布局 9 + 抽帧 5）；全部 JS 语法、JSON 校验通过；`manifest 1.4.0 / devTools=false / multiSelect=false`；`main.js` 仍只有 1 个选中项轮询，无 `setTimeout` / rAF / `resize` 监听。
+
 ## [1.3.1] - 2026-11-12
 
 ### 新增 · 批量确认弹窗显示总张数

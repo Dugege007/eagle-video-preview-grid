@@ -57,8 +57,8 @@ body[theme="DARK"] {
   padding: 8px 10px;
 }
 
-/* 首帧同步预填充完成前不显示静态默认值；visibility 保留布局高度，不会跳动。
-   script 在 body 末尾同步执行 bootControls()，通常在浏览器首次 paint 前就已移除。 */
+/* 首帧：等 onPluginCreate 同步应用真实设置后才显示，避免闪出静态默认值。
+   visibility 保留布局高度，不会跳动；移除时机在 main.js 的 onPluginCreate 里。 */
 .wrap.booting { visibility: hidden; }
 
 .toolbar {
@@ -258,53 +258,4 @@ input[type="number"]:focus { outline: 1px solid var(--accent); }
   margin-top: 4px;
   border-top: 1px solid var(--line);
   padding-top: 4px;
-}
-
-/* 批量修改确认框（eagle.dialog 不可用时的兜底） */
-.modal {
-  position: fixed;
-  inset: 0;
-  z-index: 999;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 10px;
-  background: rgba(0, 0, 0, .45);
-}
-
-.modal-box {
-  width: 100%;
-  max-width: 250px;
-  box-sizing: border-box;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--fg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
-}
-
-.modal-title {
-  margin-bottom: 6px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.modal-message {
-  font-size: 10px;
-  line-height: 15px;
-}
-
-.modal-detail {
-  margin-top: 6px;
-  color: var(--sub);
-  font-size: 9px;
-  line-height: 14px;
-}
-
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  margin-top: 12px;
 }

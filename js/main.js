@@ -1,20 +1,16 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.3.1)
+ * main.js — 检查器区块 UI 与生命周期 (v1.4.0)
  *
- * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
+ * v1.4.0：回退多选批量功能（v1.3.0/v1.3.1），恢复单选稳态；只保留
+ *   「首帧隐藏」这一无副作用改动，全局设置仍在 onPluginCreate 里读。
+ *
+ * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持。
+ *   必须在 onPluginCreate 内读取（Eagle 保证 API 就绪），提前到脚本解析
+ *   阶段会因 eagle.app.userDataPath 未就绪而静默回退成默认 false/false。
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
  *   数量 0 表示该视频不生成预览图：清掉已有缩图、不调用 FFmpeg、网格高度 0。
  *   改回 1–30 立即恢复，不需要重新选择视频。
  * 内存状态：清空后的「抑制自动生成」标记，重新选择该视频时解除
- *
- * 多选（v1.3.0，manifest.multiSelect = true）：
- *   - 选中 >1 个视频时隐藏所有缩略图、隐藏「生成 / 清空」，提示「请谨慎修改」；
- *   - 数量输入确认后弹窗确认，确认才批量写入各视频配置并生成，取消不改动任何视频；
- *   - 多选时不触发「自动生成」，避免一次选中就批量抽帧。
- *
- * 首帧（v1.3.1）：HTML 不再写死「9 / 生成 / 清空 / 关」；bootControls() 在脚本
- * 解析阶段同步读 settings.json + localStorage 记住的主题 / 数量并预填充控件，
- * 之后才移除 .booting。切换素材时不会再先闪一下静态默认值。
  *
  * 高度策略（v0.3.1 修复）：
  *   - 只由「操作事件」触发，一个事件只同步刷新一次；没有任何定时器 / 间隔刷新。
@@ -32,30 +28,23 @@
 
   var S = window.Sampler;
   var L = window.Layout;
-  var B = window.Batch;
   var Store = window.Store;
   var Capture = window.Capture;
 
   var DEFAULT_VIEWPORT = 320;   // manifest 的 inspector.height，作为拿不到视口时的兜底
   var SAFE_MARGIN = 4;          // 防裁切的固定余量
-  var BATCH_LOCK_KEY = 'pv-grid-batch-lock';
-  var BATCH_LOCK_MS = 10000;    // 锁残留最多挡 10 秒，避免实例崩溃后永久不可用
-  var PREF_KEY = 'pv-grid-prefs'; // 上次主题 / 数量，供 iframe 重建后的首帧同步预填充
 
   var state = {
     itemId: null,
-    selection: [],              // 当前选中的视频 items（多选时为全部）
-    selectionSig: null,         // 选中集合签名，只与视频 id 有关
-    multi: false,
     busy: false,
     meta: null,
     message: '',
     kind: 'hint',
     global: { autoGenerate: false, expanded: false },
-    suppressed: {},             // itemId -> true
+    suppressed: {},                 // itemId -> true
     lastCount: S.DEFAULT_COUNT,
     baseViewport: DEFAULT_VIEWPORT, // 只取一次，之后永不更新
-    lastWidth: 0                // 最近一次已知的 iframe 宽度
+    lastWidth: 0                    // 最近一次已知的 iframe 宽度
   };
 
   function $(id) { return document.getElementById(id); }
@@ -102,69 +91,10 @@
 
   function syncControls() {
     $('autoGenerate').checked = state.global.autoGenerate;
-    // 自动生成开启时、或多选时：手动「生成」与「清空」都隐藏
-    var hideManual = state.global.autoGenerate || state.multi;
-    $('generate').hidden = hideManual;
-    $('clear').hidden = hideManual;
-
-    var input = $('tileCount');
-    if (state.multi) {
-      // 多选时各视频数量可能不同，不显示任何一个的值，避免误导
-      input.value = '';
-      input.placeholder = '批量';
-    } else {
-      input.placeholder = '';
-      input.value = state.lastCount;
-    }
-  }
-
-  /* ---------- 首帧同步预填充（消除切换素材时的默认值闪烁） ---------- */
-
-  function readPrefs() {
-    try {
-      var raw = localStorage.getItem(PREF_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) { return null; }
-  }
-
-  function writePrefs(patch) {
-    try {
-      var cur = readPrefs() || {};
-      if (patch.theme) cur.theme = patch.theme;
-      if (typeof patch.count === 'number') cur.count = patch.count;
-      localStorage.setItem(PREF_KEY, JSON.stringify(cur));
-    } catch (e) { /* localStorage 不可用时静默跳过 */ }
-  }
-
-  /**
-   * 在脚本解析阶段同步执行（script 位于 body 末尾，DOM 已就绪、浏览器尚未 paint）。
-   * 主题 / 全局开关从 settings.json 同步读，数量用上次记住的值预填；
-   * 全程不发起异步调用，因此首帧就不会再闪出 HTML 里写死的「9 / 生成 / 清空 / 关」。
-   * 真正属于当前选中项的数值仍由 tick() 拿到 getSelected() 后覆盖。
-   */
-  function bootControls() {
-    var globals = null;
-    try { globals = Store.getGlobal(); } catch (e) { /* 用默认值 */ }
-
-    var boot = B.bootState(readPrefs(), globals, {
-      theme: 'LIGHT',
-      autoGenerate: false,
-      expanded: false,
-      count: S.DEFAULT_COUNT
-    });
-
-    document.body.setAttribute('theme', boot.theme);
-    state.global.autoGenerate = boot.autoGenerate;
-    state.global.expanded = boot.expanded;
-    state.lastCount = S.clampCount(boot.count);
-    syncControls();
-
-    var wrap = $('wrap');
-    if (wrap) wrap.classList.remove('booting');
-  }
-
-  function multiHint() {
-    return '已选中 ' + state.selection.length + ' 个视频 · 预览图已隐藏 · 请谨慎修改';
+    // 自动生成开启时：手动「生成」与「清空」都隐藏
+    $('generate').hidden = state.global.autoGenerate;
+    $('clear').hidden = state.global.autoGenerate;
+    $('tileCount').value = state.lastCount;
   }
 
   function describe() {
@@ -239,8 +169,7 @@
     status.className = 'status ' + state.kind;
 
     var grid = $('grid');
-    // 多选时无条件隐藏所有缩略图（不是「显示某一个视频的图」）
-    var meta = state.multi ? null : state.meta;
+    var meta = state.meta;
     var total = (meta && meta.times) ? meta.times.length : 0;
     var visible = L.visibleCount(total, state.global.expanded);
     var showToggle = L.needsToggle(total);
@@ -248,7 +177,7 @@
     // C：渲染签名只在「内容」变化时改变。状态文本更新 / 高度刷新不重建卡片、
     // 不重复读盘取 base64（store.js 也有一层内存缓存）。
     var sig = [
-      state.multi ? 'MULTI' : (state.itemId || ''),
+      state.itemId || '',
       meta ? (meta.generatedAt || 0) : 0,
       visible,
       meta && meta.results ? meta.results.join('') : ''
@@ -299,16 +228,9 @@
     refreshLayout();         // 本次事件的一次刷新（内部幂等短路）
   }
 
-  /** 官方：getSelected() 返回 Promise<items: Item[]>；兼容非数组返回。 */
-  async function selectedItems() {
-    var items = await eagle.item.getSelected();
-    if (!items) return [];
-    return Array.isArray(items) ? items : [items];
-  }
-
   async function selectedItem() {
-    var items = await selectedItems();
-    return items[0];
+    var items = await eagle.item.getSelected();
+    return items && items[0];
   }
 
   function loadCacheIfValid(item, count) {
@@ -322,76 +244,8 @@
     }) ? meta : null;
   }
 
-  /* ---------- 批量确认弹窗 ---------- */
-
-  /**
-   * 优先用官方 eagle.dialog.showMessageBox（返回 {response: 按钮索引}）；
-   * 检查器环境不支持 / 调用失败时回退到区块内 DOM 模态框。
-   * buttons 顺序刻意是 ['取消','确认']：回车默认落在「取消」，避免误改。
-   * @returns {Promise<boolean>} 是否点了「确认」
-   */
-  function askConfirm(message, detail, title) {
-    return new Promise(function (resolve) {
-      var settled = false;
-      function finish(ok) {
-        if (settled) return;
-        settled = true;
-        resolve(ok);
-      }
-      function domFallback() {
-        var modal = $('confirm');
-        $('confirmTitle').textContent = title || '批量修改确认';
-        $('confirmMessage').textContent = message;
-        $('confirmDetail').textContent = detail;
-        modal.hidden = false;
-        $('confirmOk').onclick = function () { modal.hidden = true; finish(true); };
-        $('confirmCancel').onclick = function () { modal.hidden = true; finish(false); };
-      }
-      try {
-        if (eagle.dialog && typeof eagle.dialog.showMessageBox === 'function') {
-          var p = eagle.dialog.showMessageBox({
-            title: title || '批量修改确认',
-            message: message,
-            detail: detail,
-            buttons: ['取消', '确认'],
-            type: 'warning'
-          });
-          if (p && typeof p.then === 'function') {
-            p.then(function (r) { finish(!!r && r.response === 1); })
-              .catch(domFallback);
-            return;
-          }
-        }
-      } catch (e) { /* 回退到 DOM */ }
-      domFallback();
-    });
-  }
-
-  /**
-   * 若 Eagle 在 multiSelect 下创建了多个检查器 iframe 实例，同一批选择可能触发
-   * 多次确认 / 重复抽帧。localStorage 同源共享，用它做轻量去重；
-   * 不可用时放行（宁可重复也不阻止用户操作），完成时立即清除。
-   */
-  function claimBatch() {
-    try {
-      var now = Date.now();
-      var prev = Number(localStorage.getItem(BATCH_LOCK_KEY) || 0);
-      if (prev && now - prev < BATCH_LOCK_MS) return false;
-      localStorage.setItem(BATCH_LOCK_KEY, String(now));
-      return true;
-    } catch (e) {
-      return true;
-    }
-  }
-
-  function releaseBatch() {
-    try { localStorage.removeItem(BATCH_LOCK_KEY); } catch (e) { /* ignore */ }
-  }
-
-  /* ---------- 单选：生成 / 清空 / 设为 0（v1.2.0 行为，未改动） ---------- */
-
   async function generate() {
-    if (state.busy || state.multi) return;
+    if (state.busy) return;
     if (!state.itemId) {
       setMessage('请先选中一个视频文件', 'warn');
       render();
@@ -488,7 +342,7 @@
   }
 
   function clearPreview() {
-    if (state.busy || state.multi || !state.itemId) return;
+    if (state.busy || !state.itemId) return;
     try {
       Store.clearItem(state.itemId);
     } catch (e) {
@@ -527,132 +381,22 @@
     render();                                  // 本次事件的一次刷新
   }
 
-  /* ---------- 多选：批量应用 ---------- */
-
-  /**
-   * 确认后统一修改数量并生成。串行处理视频（每个视频内部抽帧并发 2），
-   * 单个视频失败不中断整批；缓存符合数量 / 规则 / 源文件时直接跳过。
-   * 不写 state.meta —— 多选态始终不显示缩略图。
-   */
-  async function batchApply(items, count) {
-    if (state.busy) return;
-    if (!claimBatch()) {
-      setMessage('另一个检查器实例正在处理批量修改，请稍后再试', 'warn');
-      render();
-      return;
-    }
-
-    setBusy(true);
-    var total = items.length;
-    var skipped = 0;
-    var failed = 0;
-    var paths = null;
-
-    try {
-      if (count !== S.MIN_COUNT) {
-        paths = await Capture.ensureFFmpeg();   // 依赖缺失时整批直接中止，不逐个报错
-      }
-
-      for (var i = 0; i < total; i++) {
-        var item = items[i];
-        setMessage('批量处理 ' + (i + 1) + ' / ' + total + ' …', 'hint');
-        $('status').textContent = state.message;   // 只更新文本，不触发高度刷新
-
-        try {
-          Store.setItemConfig(item.id, { tileCount: count });
-
-          if (count === S.MIN_COUNT) {
-            Store.clearItem(item.id);              // clearItem 保留 config.json，0 已写入
-            continue;
-          }
-
-          if (loadCacheIfValid(item, count)) { skipped++; continue; }
-
-          var duration = await Capture.probeDuration(paths.ffprobe, item.filePath);
-          var p = S.plan(duration, count);
-          if (p.reason === 'too-short' || p.times.length === 0) { skipped++; continue; }
-
-          Store.ensureItemDir(item.id);
-          var outPaths = p.times.map(function (_, k) { return Store.thumbFile(item.id, k); });
-          var r = await Capture.captureAll(
-            paths.ffmpeg, item.filePath, p.times, outPaths,
-            function (done, t) {
-              setMessage('批量 ' + (i + 1) + '/' + total + ' · 抽帧 ' + done + '/' + t + ' …', 'hint');
-              $('status').textContent = state.message;
-            }
-          );
-
-          var stat = Store.fileStat(item.filePath);
-          Store.writeMeta(item.id, {
-            rule: Store.RULE_VERSION,
-            count: count,
-            duration: duration,
-            gap: p.gap,
-            times: p.times,
-            results: r.results,
-            truncated: p.truncated,
-            droppedFirst: p.droppedFirst,
-            sourceSize: stat.size,
-            sourceMtime: stat.mtimeMs,
-            generatedAt: Date.now()
-          });
-          if (r.failures > 0) failed++;
-        } catch (e) {
-          failed++;                              // 单视频失败不影响其余视频
-        }
-      }
-
-      setMessage(B.summary(total, count, skipped, failed), failed ? 'warn' : 'ok');
-    } catch (e) {
-      setMessage(friendlyError(e), 'error');
-    } finally {
-      setBusy(false);
-      releaseBatch();
-      render();
-    }
-  }
-
-  /* ---------- 选中项轮询（官方没有选中变化 event） ---------- */
-
   var ticking = false;
   async function tick() {
-    if (ticking || state.busy) return;
+    if (ticking) return;
     ticking = true;
     try {
       // 只检测「选中项变化」；不读取尺寸、不刷新高度。
-      var items = await selectedItems();
-      var sig = B.selectionSignature(items);
-      if (sig === state.selectionSig) return;
-
-      state.selectionSig = sig;
-      var videos = B.videosOnly(items);
-      state.selection = videos;
-      state.multi = videos.length > 1;
-
-      // 多选：隐藏所有缩略图、隐藏手动按钮、提示谨慎修改；不自动生成
-      if (state.multi) {
-        state.itemId = null;
-        state.meta = null;
-        syncControls();
-        var ignored = items.length - videos.length;   // 混合选中时说明哪些被忽略
-        setMessage(
-          multiHint() +
-          (ignored > 0 ? ' · 已忽略 ' + ignored + ' 个非视频素材' : '') +
-          '；在「数量」输入后确认即可批量修改',
-          'warn'
-        );
-        render();
-        return;
-      }
-
-      var item = videos[0] || null;
+      // 官方 7 个 event 里没有选中变化事件，这个 1s 轮询是必需的，且与高度无关。
+      var item = await selectedItem();
       var id = item ? item.id : null;
+      if (id === state.itemId) return;
+
       state.itemId = id;
       if (id && state.suppressed[id]) delete state.suppressed[id];  // 重新选择 -> 解除抑制
 
       if (!id) {
         state.meta = null;
-        syncControls();
         setMessage('请选中一个视频文件', 'hint');
         render();
         return;
@@ -662,7 +406,6 @@
       var cfg = Store.getItemConfig(id);
       state.lastCount = cfg.tileCount;
       syncControls();
-      writePrefs({ count: cfg.tileCount });   // 记住真实数量，供下次首帧预填充
 
       // 该视频设为 0 张：即使「自动生成」开启也跳过，不读缓存、不抽帧。
       if (cfg.tileCount === S.MIN_COUNT) {
@@ -697,22 +440,23 @@
     }
   }
 
-  // 同步首帧预填充：必须在任何 await / IPC 之前完成，避免默认值闪烁
-  bootControls();
-
   eagle.onPluginCreate(async function () {
+    // 先同步应用全局设置并解除首帧隐藏，再等异步主题。
+    // Eagle 在此回调时已保证 Plugin API 就绪，Store.getGlobal() 一定能读到
+    // settings.json；千万不要把这一步提前到脚本解析阶段（v1.3.1 的回归成因）。
+    try {
+      state.global = Store.getGlobal();
+    } catch (e) {
+      setMessage(friendlyError(e), 'error');
+    }
+    syncControls();
+    var bootWrap = $('wrap');
+    if (bootWrap) bootWrap.classList.remove('booting');
+
     try {
       var theme = await eagle.app.theme;
-      if (theme) {
-        // boot 已用缓存主题上色，只有真的不同才改 DOM，避免无谓闪烁
-        if (document.body.getAttribute('theme') !== theme) {
-          document.body.setAttribute('theme', theme);
-        }
-        writePrefs({ theme: theme });   // 记住真实主题，供下次 iframe 重建的首帧使用
-      }
-    } catch (e) { /* 沿用 boot 时的缓存主题 */ }
-
-    // 全局设置与控件已在 bootControls() 里同步就绪，这里不再重复读文件 / 写 DOM。
+      document.body.setAttribute('theme', theme || 'LIGHT');
+    } catch (e) { /* 主题取不到时用默认 */ }
 
     // 固定基准只取一次；之后即使 iframe 尺寸变化也不重新取值
     state.baseViewport = window.innerHeight || DEFAULT_VIEWPORT;
@@ -742,67 +486,24 @@
       try { Store.setGlobal({ autoGenerate: state.global.autoGenerate }); } catch (e) { /* ignore */ }
       syncControls();
       setMessage(
-        (state.multi ? '多选中 · 预览图已隐藏 · ' : '') +
-        (state.global.autoGenerate ? '自动生成已开启：选择视频时自动生成' : '自动生成已关闭'),
-        state.multi ? 'warn' : 'hint'
+        state.global.autoGenerate ? '自动生成已开启：选择视频时自动生成' : '自动生成已关闭',
+        'hint'
       );
       render();            // 开关切换：一次刷新
     });
 
     $('toggle').addEventListener('click', function () {
-      if (state.multi) return;
       state.global.expanded = !state.global.expanded;
       try { Store.setGlobal({ expanded: state.global.expanded }); } catch (e) { /* ignore */ }
       setMessage(describe(), 'hint');
       render();            // 展开 / 收起：一次刷新
     });
 
-    $('tileCount').addEventListener('change', async function () {
-      if (state.busy) return;
-      var input = this;
-      var raw = input.value;
-
-      /* ---- 多选：先弹窗确认，取消则不改任何视频 ---- */
-      if (state.multi) {
-        if (String(raw).trim() === '') { input.value = ''; return; }  // 空输入不算修改
-        var snapshot = state.selection.slice();
-        var k = snapshot.length;
-        if (!k) { input.value = ''; return; }
-
-        var bn = S.clampCount(raw);
-        var ok = await askConfirm(B.confirmMessage(k, bn), B.confirmDetail(k, bn));
-
-        // 弹窗期间用户可能改了选择；以弹窗时那批视频为准，不一致就放弃并要求重新确认
-        if (ok && (!state.multi ||
-                   B.selectionSignature(state.selection) !== B.selectionSignature(snapshot))) {
-          setMessage(state.multi
-            ? multiHint() + ' · 选择已变化，请重新输入数量确认'
-            : '选择已变化，未执行批量修改', 'warn');
-          syncControls();
-          render();
-          return;
-        }
-        if (!ok) {
-          setMessage(state.multi
-            ? multiHint() + ' · 已取消，未改动任何视频'
-            : '已取消批量修改，未改动任何视频', 'hint');
-          syncControls();     // 多选时把输入框恢复为空；单选时恢复该视频自己的数量
-          render();
-          return;
-        }
-
-        input.value = bn;
-        writePrefs({ count: bn });       // 批量数量也记住，切回单选时首帧更接近
-        await batchApply(snapshot, bn);
-        return;
-      }
-
-      /* ---- 单选：v1.2.0 原有逻辑 ---- */
-      var n = S.clampCount(raw);
-      input.value = n;
+    $('tileCount').addEventListener('change', function () {
+      var n = S.clampCount(this.value);
+      this.value = n;
       state.lastCount = n;
       if (!state.itemId) return;
-      writePrefs({ count: n });
 
       // 0 张统一走同一入口：不论「自动生成」开关状态，都立即清缓存并记住该设置，
       // 绝不会因为开关开启而被 generate() 重新生成回来。
@@ -841,8 +542,6 @@
   });
 
   eagle.onThemeChanged(function (theme) {
-    var t = theme || 'LIGHT';
-    document.body.setAttribute('theme', t);
-    writePrefs({ theme: t });
+    document.body.setAttribute('theme', theme || 'LIGHT');
   });
 })();
