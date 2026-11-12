@@ -3,6 +3,31 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本。
 
+## [1.3.0] - 2026-11-12
+
+### 新增 · 多选视频批量修改数量并生成
+
+需求：多选视频后，在检查器里统一修改预览图张数并生成；多选时隐藏所有已生成的缩略图并提示谨慎修改；输入确认时弹窗确认「修改 X 个视频的生成预览图张数为 Y？」，确认才修改、取消不修改。
+
+**可行性依据**（官方，高可信）：[检查器插件](https://developer.eagle.cool/plugin-api/zh-cn/get-started/plugin-types/inspector) 的 `inspector.multiSelect` 控制「多选时是否要显示」；[item API](https://developer.eagle.cool/plugin-api/zh-cn/api/item) 明确 `getSelected()` 返回 `Promise<items: Item[]>`、`item.ext` 可读；[dialog API](https://developer.eagle.cool/plugin-api/zh-cn/api/dialog) 的 `showMessageBox()` 返回 `{response: 按钮索引}`。三个能力都不需要绕开官方边界。
+
+- `manifest.json`：`multiSelect` `false` → **`true`**，多选时插件区块才会出现。
+- 新增 `js/batch.js` 纯函数：按 `ext`（缺失时回退 `filePath` 后缀）过滤视频、用**视频 id 集合签名**判断选中是否变化、生成确认与汇总文案。
+- `main.js`：
+  - `tick()` 改为基于选中签名；多选时清空网格、隐藏「生成 / 清空」、数量输入框留空（placeholder「批量」）、显示「已选中 X 个视频 · 预览图已隐藏 · 请谨慎修改」，**不触发自动生成**。
+  - 多选下数量输入确认 → `askConfirm()` 弹窗。优先 `eagle.dialog.showMessageBox`（按钮顺序 `['取消','确认']`，回车默认落在取消）；检查器环境不支持时回退到区块内 DOM 模态框。
+  - 取消 = 不改任何 `config.json` / 缓存，输入框恢复；弹窗期间选择发生变化则放弃并要求重新确认。
+  - 确认后 `batchApply()` 串行处理：各视频写自己的数量、缓存命中或时长不足则跳过、`0` 张清缓存不抽帧、其余 probe + plan + 抽帧 + 写 meta；单视频失败不中断整批，结束给汇总。
+  - 批量期间 `state.busy` 挡住轮询；另用 `localStorage` 轻量去重，防止 `multiSelect` 下多实例重复执行。
+- 单选路径（生成 / 清空 / 0 张 / 自动生成 / 事件驱动高度）**未改动**。
+
+**仍需真实 Eagle 实测的两项**（官方文档未写明）：`multiSelect: true` 下 Eagle 是只创建一个检查器实例还是每个素材一个；`eagle.dialog` 在检查器 iframe 内是否可用（已备 DOM 兜底）。
+
+### 单测
+
+- 新增 `test/batch.test.js` 7 组（视频过滤、后缀回退、选中签名顺序无关、多选判定、确认文案、汇总文案）。
+- `npm test` **33/33** 通过（采样 12 + 布局 9 + 抽帧 5 + 批量 7）。
+
 ## [1.2.0] - 2026-11-12
 
 ### 新增 · 生成数量允许 0（该视频不生成预览图）
