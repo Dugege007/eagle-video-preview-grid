@@ -1,5 +1,5 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.1.0)
+ * main.js — 检查器区块 UI 与生命周期 (v1.1.1)
  *
  * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
@@ -119,6 +119,13 @@
     var overflow;
     var margin;
 
+    // 插件 iframe 刚创建时 Eagle 可能还没给它分配最终高度，
+    // 首个视频的首次测量会偏小。只在基准明显不可信时重取一次，之后仍固定不变
+    // （不引入定时器；这正是 v0.3.1 修掉反馈循环的关键约束）。
+    if (state.baseViewport < 200) {
+      state.baseViewport = window.innerHeight || DEFAULT_VIEWPORT;
+    }
+
     if (n === 0) {
       px = '0px';
       overflow = 'hidden';
@@ -185,6 +192,12 @@
           img.className = 'thumb';
           img.alt = '';
           img.title = S.formatTime(meta.times[i]);
+          // 首次生成时图片尚未解码完成，cellH 可能量到未布局的值。
+          // 最后一张图 load 后再同步校准一次高度：纯事件、一次；
+          // refreshLayout() 有幂等短路，值相同就不会写 DOM。
+          if (i === visible - 1) {
+            img.addEventListener('load', refreshLayout, { once: true });
+          }
           try {
             img.src = Store.thumbDataURL(state.itemId, i);
           } catch (e) {
