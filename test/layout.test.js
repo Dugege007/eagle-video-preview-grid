@@ -74,6 +74,19 @@ test('任意张数：收起不超过 3 行高度，展开高度不小于收起�
   }
 });
 
+test('回归：固定基准下反复刷新结果恒定（防止高度逐次递减）', function () {
+  // v0.3.0 的 Bug：用会随自身写入而变化的 innerHeight 算 avail，
+  // 每刷新一次就少 SAFE_MARGIN(4px)。固定基准后重复 50 次必须完全一致。
+  var baseViewport = 320;
+  var chrome = 94;
+  var avail = baseViewport - chrome - 4;   // 222
+  var first = L.fitHeight(264, avail);
+  assert.deepStrictEqual(first, { height: 222, scroll: true });
+  for (var i = 0; i < 50; i++) {
+    assert.deepStrictEqual(L.fitHeight(264, avail), first);
+  }
+});
+
 var failed = 0;
 cases.forEach(function (c) {
   try {

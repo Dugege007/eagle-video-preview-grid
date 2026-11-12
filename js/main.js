@@ -1,13 +1,18 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v0.3.0)
+ * main.js — 检查器区块 UI 与生命周期 (v0.3.1)
  *
  * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持
  * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
  * 内存状态：清空后的「抑制自动生成」标记，重新选择该视频时解除
  *
- * 高度策略：官方没有运行时改检查器 iframe 高度的 API，因此把「刷新高度」
- * 做成幂等的 refreshLayout()，挂到所有关键时机；展开时行数不封顶，
- * 并做防裁切保护（超出 iframe 可用高度时退回内部滚动）。
+ * 高度策略（v0.3.1 修复）：
+ *   - 只由「操作事件」触发，一个事件只同步刷新一次；没有任何定时器 / 间隔刷新。
+ *   - 可用高度用插件加载时记录的固定基准 baseViewport，绝不读取会随自身写入
+ *     而变化的 window.innerHeight —— 这是 v0.3.0 高度逐次递减的根因。
+ *   - 不再尝试改宿主 iframe 高度（实测无效，且是反馈循环的另一半）。
+ *   - refreshLayout() 幂等：值没变就一个字都不写。
+ *
+ * 1s 轮询只用于检测「选中项变化」（官方 7 个 event 里没有该事件），不触碰高度。
  *
  * 明确不做：点击跳转播放、快捷键、自定义取帧、可编辑描述、hover 播放。
  */
@@ -19,6 +24,9 @@
   var Store = window.Store;
   var Capture = window.Capture;
 
+  var DEFAULT_VIEWPORT = 320;   // manifest 的 inspector.height，作为拿不到视口时的兜底
+  var SAFE_MARGIN = 4;          // 防裁切的固定余量
+
   var state = {
     itemId: null,
     busy: false,
@@ -28,7 +36,7 @@
     global: { autoGenerate: false, expanded: false },
     suppressed: {},                 // itemId -> true
     lastCount: S.DEFAULT_COUNT,
-    lastInnerHeight: 0
+    baseViewport: DEFAULT_VIEWPORT // 只取一次，之后永不更新
   };
 
   function $(id) { return document.getElementById(id); }
@@ -98,109 +106,46 @@
   }
 
   /**
-   * 尽力而为地同步宿主 iframe 高度（官方无对应 API）。
-   * 多路尝试：frameElement 的 style / height 属性、宿主 document 里承载本窗口的
-   * iframe / webview 元素。全部包在 try/catch 里，宿主不允许就静默退回固定高度。
-   */
-  function tryResizeHost(h) {
-    if (!h || h < 20) return false;
-    var px = Math.ceil(h) + 'px';
-    var ok = false;
-    try {
-      var fe = window.frameElement;
-      if (fe) {
-        if (fe.style) {
-          fe.style.height = px;
-          fe.style.minHeight = px;
-        }
-        try { fe.setAttribute('height', String(Math.ceil(h))); } catch (e) { /* ignore */ }
-        ok = true;
-      }
-    } catch (e) { /* 跨域 / webview */ }
-
-    try {
-      if (window.parent && window.parent !== window) {
-        var list = window.parent.document.querySelectorAll('iframe,webview');
-        for (var i = 0; i < list.length; i++) {
-          try {
-            if (list[i].contentWindow === window) {
-              list[i].style.height = px;
-              list[i].style.minHeight = px;
-              ok = true;
-              break;
-            }
-          } catch (e2) { /* 单个元素无权限 */ }
-        }
-      }
-    } catch (e3) { /* 宿主文档不可访问 */ }
-
-    return ok;
-  }
-
-  /** 只读探测：判断 eagle.window 是否指向可控的检查器窗口（不调用 setSize）。 */
-  async function probeHost() {
-    try {
-      var size = (eagle.window && typeof eagle.window.getSize === 'function')
-        ? await eagle.window.getSize()
-        : null;
-      var w = size && size[0];
-      var h = size && size[1];
-      console.log('[pv-grid] host probe', {
-        frameElement: !!window.frameElement,
-        innerHeight: window.innerHeight,
-        windowGetSize: size,
-        looksLikeInspectorWindow: !!(w && h && w <= 600 && h <= 1200)
-      });
-    } catch (e) {
-      console.log('[pv-grid] host probe unavailable:', e && e.message);
-    }
-  }
-
-  /**
-   * 幂等的高度刷新：按当前 DOM 里的卡片数、实测行高、展开状态、
-   * 以及 iframe 当前可用视口高度，重新计算网格高度。
-   * 这是「自适应」的核心动作，可在任意操作之后重复调用。
+   * 纯同步、幂等的高度刷新。只由事件调用，一个事件一次。
+   * 可用高度基于固定基准 baseViewport，不读取动态 window.innerHeight，
+   * 因此重复调用永远得到同一个结果，不会逐次递减。
    */
   function refreshLayout() {
     var grid = $('grid');
     var cells = grid.querySelectorAll('.cell');
     var n = cells.length;
+    var px;
+    var overflow;
+    var margin;
 
     if (n === 0) {
-      grid.style.height = '0px';
-      grid.style.marginTop = '0px';
-      grid.style.overflowY = 'hidden';
-      tryResizeHost($('wrap').getBoundingClientRect().height);
-      return;
+      px = '0px';
+      overflow = 'hidden';
+      margin = '0px';
+    } else {
+      var cellH = cells[0].getBoundingClientRect().height;
+      var gap = parseFloat(window.getComputedStyle(grid).rowGap) || 8;
+      var target = L.heightFor(n, cellH, gap, state.global.expanded);
+
+      // 除网格外的固定开销（工具栏 / 状态行 / footer / padding）
+      var wrapH = $('wrap').getBoundingClientRect().height;
+      var gridH = grid.getBoundingClientRect().height;
+      var chrome = Math.max(0, wrapH - gridH);
+      var avail = Math.max(0, state.baseViewport - chrome - SAFE_MARGIN);
+      var fit = L.fitHeight(target, avail);
+
+      px = fit.height + 'px';
+      overflow = fit.scroll ? 'auto' : 'hidden';
+      margin = '6px';
     }
 
-    var cellH = cells[0].getBoundingClientRect().height;
-    var gap = parseFloat(window.getComputedStyle(grid).rowGap) || 8;
-    var target = L.heightFor(n, cellH, gap, state.global.expanded);
-
-    // 除网格外的固定开销（工具栏 / 状态行 / footer / padding）
-    var wrapH = $('wrap').getBoundingClientRect().height;
-    var gridH = grid.getBoundingClientRect().height;
-    var chrome = Math.max(0, wrapH - gridH);
-    var avail = Math.max(0, window.innerHeight - chrome - 4);
-    var fit = L.fitHeight(target, avail);
-
-    grid.style.marginTop = '6px';
-    grid.style.height = fit.height + 'px';
-    grid.style.overflowY = fit.scroll ? 'auto' : 'hidden';
-
-    tryResizeHost(Math.ceil($('wrap').getBoundingClientRect().height));
-  }
-
-  var refreshTimerA = null;
-  var refreshTimerB = null;
-  /** 对抗宿主重排：rAF + 两段延时各刷一次。带防抖，进度更新不会堆积。 */
-  function scheduleRefresh() {
-    if (window.requestAnimationFrame) window.requestAnimationFrame(refreshLayout);
-    clearTimeout(refreshTimerA);
-    clearTimeout(refreshTimerB);
-    refreshTimerA = setTimeout(refreshLayout, 120);
-    refreshTimerB = setTimeout(refreshLayout, 400);
+    // 幂等短路：值没变就不写 DOM，杜绝任何写入 -> resize -> 再写入的反馈循环
+    if (grid.style.height === px &&
+        grid.style.overflowY === overflow &&
+        grid.style.marginTop === margin) return;
+    grid.style.height = px;
+    grid.style.overflowY = overflow;
+    grid.style.marginTop = margin;
   }
 
   function render() {
@@ -218,8 +163,7 @@
 
     if (total === 0) {
       $('footer').hidden = true;
-      refreshLayout();
-      scheduleRefresh();
+      refreshLayout();       // 本次事件的一次刷新
       return;
     }
 
@@ -255,8 +199,7 @@
 
     $('footer').hidden = !showToggle;
     $('toggle').textContent = state.global.expanded ? '收起 ▴' : '展开 ▾';
-    refreshLayout();
-    scheduleRefresh();
+    refreshLayout();         // 本次事件的一次刷新
   }
 
   async function selectedItem() {
@@ -333,7 +276,7 @@
         paths.ffmpeg, item.filePath, p.times, outPaths,
         function (done, total) {
           setMessage('正在抽帧 ' + done + ' / ' + total + ' …', 'hint');
-          $('status').textContent = state.message;
+          $('status').textContent = state.message;   // 只更新文本，不触发 render / 高度刷新
         }
       );
 
@@ -388,14 +331,8 @@
     if (ticking) return;
     ticking = true;
     try {
-      // 宿主高度若被撑高 / 检查器宽度变化，轮询里也能感知并重算
-      var ih = window.innerHeight;
-      if (ih !== state.lastInnerHeight) {
-        state.lastInnerHeight = ih;
-        refreshLayout();
-      }
-
-      // 官方 7 个 event 中没有「选中项变化」，只能轮询
+      // 只检测「选中项变化」；不读取尺寸、不刷新高度。
+      // 官方 7 个 event 里没有选中变化事件，这个 1s 轮询是必需的，且与高度无关。
       var item = await selectedItem();
       var id = item ? item.id : null;
       if (id === state.itemId) return;
@@ -419,8 +356,7 @@
       if (cached) {
         state.meta = cached;
         setMessage(describe(), 'hint');
-        render();
-        scheduleRefresh();   // 重新选择资源后刷新高度
+        render();          // 重新选择资源：一次刷新
         return;
       }
 
@@ -429,9 +365,8 @@
         await generate();
       } else {
         setMessage('尚未生成预览图，点「生成」按钮自动生成', 'hint');
-        render();
+        render();          // 重新选择资源：一次刷新
       }
-      scheduleRefresh();     // 重新选择资源后刷新高度
       // 注意：state.global.expanded 是全局的，切换视频不重置
     } catch (e) {
       state.meta = null;
@@ -454,8 +389,10 @@
       setMessage(friendlyError(e), 'error');
     }
     syncControls();
-    state.lastInnerHeight = window.innerHeight;
-    probeHost();
+
+    // 固定基准只取一次；之后即使 iframe 尺寸变化也不重新取值
+    state.baseViewport = window.innerHeight || DEFAULT_VIEWPORT;
+    var lastWidth = window.innerWidth;
 
     $('generate').addEventListener('click', generate);
     $('clear').addEventListener('click', clearPreview);
@@ -468,15 +405,14 @@
         state.global.autoGenerate ? '自动生成已开启：选择视频时自动生成' : '自动生成已关闭',
         'hint'
       );
-      render();
+      render();            // 开关切换：一次刷新
     });
 
     $('toggle').addEventListener('click', function () {
       state.global.expanded = !state.global.expanded;
       try { Store.setGlobal({ expanded: state.global.expanded }); } catch (e) { /* ignore */ }
       setMessage(describe(), 'hint');
-      render();
-      scheduleRefresh();   // 展开 / 收起后按当前张数刷新高度
+      render();            // 展开 / 收起：一次刷新
     });
 
     $('tileCount').addEventListener('change', function () {
@@ -496,24 +432,21 @@
             : '数量已改为 ' + n + '，点「生成」重新生成',
           'hint'
         );
-        render();
+        render();          // 数量确认：一次刷新
       }
-      scheduleRefresh();   // 重设数量后刷新高度
     });
 
-    // 拖拽检查器宽度：iframe 尺寸变化会触发 resize；mouseup 兜底「松开后」再刷一次
-    var resizeTimer = null;
-    window.addEventListener('resize', function () {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(refreshLayout, 120);
-    });
+    // 拖拽检查器宽度：只在「鼠标松开」且宽度确实变化时，同步刷新一次。
+    // 不用 resize 防抖、不用 setTimeout、不做二次校准。
     window.addEventListener('mouseup', function () {
-      setTimeout(refreshLayout, 60);
-      setTimeout(refreshLayout, 220);
+      var w = window.innerWidth;
+      if (w === lastWidth) return;
+      lastWidth = w;
+      refreshLayout();
     });
 
     await tick();
-    setInterval(tick, 1000);
+    setInterval(tick, 1000);   // 仅选中项轮询，与高度无关
   });
 
   eagle.onThemeChanged(function (theme) {

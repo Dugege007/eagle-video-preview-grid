@@ -3,6 +3,41 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本，当前处于 0.x，API 与行为仍可能调整。
 
+## [0.3.1] - 2026-11-12
+
+### 修复 · 预览框高度不停逐次递减
+
+用户实测反馈：「预览框会不停地自动一点一点减少高度」。根因是 v0.3.0 引入的**递减反馈循环**：
+
+1. `tryResizeHost()` 每次把宿主 iframe 的 `style.height` / `minHeight` 设为「当前内容高度」；
+2. `refreshLayout()` 又用会随 iframe 变化而变化的 `window.innerHeight` 计算
+   `avail = innerHeight - chrome - 4`，`fitHeight()` 把网格设为 `avail`；
+3. 新的内容高度 = `innerHeight - 4`，于是宿主又被写小 4px；
+4. `resize` 防抖、rAF + 120ms / 400ms 二次校准、1s 轮询里的 `innerHeight` 检测
+   反复触发下一轮 → 每轮缩 4px，无限递减。
+
+### 变更（按用户要求：纯事件驱动，一个事件只刷新一次）
+
+- **移除全部定时 / 间隔刷新**：删 `scheduleRefresh()`（rAF + 120/400ms）、`resize` 防抖监听、
+  1s 轮询里的 `innerHeight` 检测与重算、`mouseup` 里的两个 `setTimeout`。
+- **删除 `tryResizeHost()` 与 `probeHost()`**：宿主高度实测改不动，且它正是反馈循环的另一半；
+  不再尝试改外框。
+- **固定基准**：`state.baseViewport` 只在插件加载时取一次 `window.innerHeight`
+  （兜底用 manifest 的 `height = 320`），此后永不更新；`avail` 不再随自身写入而漂移。
+- **幂等短路**：`refreshLayout()` 计算出的 `height` / `overflowY` / `marginTop`
+  与当前值相同时一个字都不写，杜绝「写入 → 事件 → 再写入」循环。
+- **刷新时机（每个事件一次同步刷新，无定时器）**：初始化、重新选择资源、生成完成、
+  清空、展开 / 收起、数量确认、自动生成开关切换 → 统一走 `render()` 末尾一次
+  `refreshLayout()`；拖拽检查器宽度 → 仅 `mouseup` 且 `innerWidth` 确实变化时刷新一次。
+- 抽帧进度改为只更新状态行文本，不触发 `render()` / 高度刷新。
+- `setInterval(tick, 1000)` **保留**，但只用于检测选中项变化（官方无对应 event），
+  完全不触碰尺寸与高度。
+
+### 单测
+
+- `test/layout.test.js` 增加回归用例「固定基准下反复刷新 50 次结果恒定」，
+  `npm test` 共 **19/19** 通过（采样 11 + 布局 8）。
+
 ## [0.3.0] - 2026-11-12
 
 ### 新增 · 按需刷新高度（逼近「自适应」）
