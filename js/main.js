@@ -1,5 +1,11 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.4.0)
+ * main.js — 检查器区块 UI 与生命周期 (v1.5.0)
+ *
+ * v1.5.0：抽帧结果「逐帧落盘、可续抽、部分失败也算完成」：
+ *   - meta.json 既是草稿也是最终结果（requested / complete / results）
+ *   - 抽帧失败的点保留为占位卡片（提示视频该节点可能损坏），作为已定结果缓存
+ *   - 切换选中不中断任务；任务按 itemId 去重，完成回调只在选中项匹配时更新 UI
+ *   - 旧缓存（无 requested / complete）就地兼容，不升 RULE_VERSION、不重抽
  *
  * v1.4.0：回退多选批量功能（v1.3.0/v1.3.1），恢复单选稳态；只保留
  *   「首帧隐藏」这一无副作用改动，全局设置仍在 onPluginCreate 里读。
@@ -36,7 +42,7 @@
 
   var state = {
     itemId: null,
-    busy: false,
+    running: {},                // itemId -> true：按视频去重，切换选中不中断后台任务
     meta: null,
     message: '',
     kind: 'hint',
@@ -80,13 +86,27 @@
     return '操作失败：' + code.slice(0, 160);
   }
 
-  function setBusy(busy) {
-    state.busy = busy;
+  /** 控件是否禁用只看「当前显示的这个视频」有没有任务在跑。 */
+  function syncBusy() {
+    var busy = !!(state.itemId && state.running[state.itemId]);
     $('generate').disabled = busy;
     $('clear').disabled = busy;
     $('tileCount').disabled = busy;
     $('autoGenerate').disabled = busy;
     $('generate').textContent = busy ? '生成中…' : '生成';
+  }
+
+  function isMine(itemId) { return state.itemId === itemId; }
+
+  /** 缓存规格键：请求张数 + 源文件大小 / 修改时间（规则版本由 Store 内部比）。 */
+  function specOf(item, count) {
+    var stat = Store.fileStat(item.filePath);
+    return {
+      itemId: item.id,
+      count: count,
+      sourceSize: stat.size,
+      sourceMtime: stat.mtimeMs
+    };
   }
 
   function syncControls() {
@@ -110,6 +130,12 @@
     parts.push('间隔 ' + Number(meta.gap).toFixed(1) + 's');
     if (meta.truncated) parts.push('受最低间隔限制');
     if (meta.droppedFirst) parts.push('已跳过片头');
+    var results = Array.isArray(meta.results) ? meta.results : [];
+    var done = results.filter(function (r) { return r === true || r === false; }).length;
+    var failed = results.filter(function (r) { return r === false; }).length;
+    // 失败帧仍是 9 张里的一张（占位卡片），所以 total 不变、只补一句提示
+    if (failed > 0) parts.push(failed + ' 张抽帧失败');
+    if (meta.complete === false) parts.push('已完成 ' + done + ' / ' + total);
     return parts.join(' · ');
   }
 
@@ -180,7 +206,9 @@
       state.itemId || '',
       meta ? (meta.generatedAt || 0) : 0,
       visible,
-      meta && meta.results ? meta.results.join('') : ''
+      meta && meta.results ? meta.results.map(function (r) {
+        return r === true ? '1' : (r === false ? '0' : '-');   // 待抽帧也要进签名
+      }).join('') : ''
     ].join('|');
 
     if (grid.getAttribute('data-sig') !== sig) {
@@ -189,11 +217,19 @@
         var cell = document.createElement('div');
         cell.className = 'cell';
 
-        if (meta.results && meta.results[i] === false) {
+        var frameStatus = meta.results ? meta.results[i] : undefined;
+        if (frameStatus === false) {
+          // 已定失败：占位卡片也算一张图，提示视频该时间点可能损坏
           var ph = document.createElement('div');
           ph.className = 'thumb placeholder';
           ph.textContent = '抽帧失败';
           cell.appendChild(ph);
+        } else if (frameStatus === undefined) {
+          // 草稿里还没抽到的帧：与「抽帧失败」区分开
+          var pending = document.createElement('div');
+          pending.className = 'thumb placeholder pending';
+          pending.textContent = '待抽帧';
+          cell.appendChild(pending);
         } else {
           var img = document.createElement('img');
           img.className = 'thumb';
@@ -228,24 +264,43 @@
     refreshLayout();         // 本次事件的一次刷新（内部幂等短路）
   }
 
+  /**
+   * 抽帧过程中逐张替换「待抽帧」占位：只改这一格，不整块 render、不刷新高度。
+   * 占位与图片同为 16:9 尺寸，替换不会改变行高。
+   */
+  function replacePendingCell(itemId, index, ok, times) {
+    var grid = $('grid');
+    var cell = grid.children[index];
+    if (!cell) return;                       // 收起态只渲染前 9 张，超出的没有 cell
+    var old = cell.querySelector('.thumb.pending');
+    if (!old) return;
+    var repl;
+    if (ok) {
+      repl = document.createElement('img');
+      repl.className = 'thumb';
+      repl.alt = '';
+      repl.title = S.formatTime(times[index]);
+      try {
+        repl.src = Store.thumbDataURL(itemId, index);
+      } catch (e) {
+        repl = document.createElement('div');
+        repl.className = 'thumb placeholder';
+        repl.textContent = '读取失败';
+      }
+    } else {
+      repl = document.createElement('div');
+      repl.className = 'thumb placeholder';
+      repl.textContent = '抽帧失败';
+    }
+    cell.replaceChild(repl, old);
+  }
+
   async function selectedItem() {
     var items = await eagle.item.getSelected();
     return items && items[0];
   }
 
-  function loadCacheIfValid(item, count) {
-    var stat = Store.fileStat(item.filePath);
-    var meta = Store.readMeta(item.id);
-    return Store.isCacheValid(meta, {
-      itemId: item.id,
-      count: count,
-      sourceSize: stat.size,
-      sourceMtime: stat.mtimeMs
-    }) ? meta : null;
-  }
-
   async function generate() {
-    if (state.busy) return;
     if (!state.itemId) {
       setMessage('请先选中一个视频文件', 'warn');
       render();
@@ -264,85 +319,140 @@
 
     try { Store.setItemConfig(state.itemId, { tileCount: count }); } catch (e) { /* 不阻塞 */ }
 
-    // 已有符合数量 / 规则 / 源文件的缓存 -> 直接复用，不重复抽帧
+    // 一次选中项快照：整个任务都用这个 item，切换选中不会改变任务归属
+    var item;
     try {
-      var item0 = await selectedItem();
-      if (item0) {
-        var cached = loadCacheIfValid(item0, count);
-        if (cached) {
-          state.meta = cached;
-          setMessage(describe(), 'hint');
-          render();
+      item = await selectedItem();
+    } catch (e) {
+      setMessage(friendlyError(e), 'error');
+      render();
+      return;
+    }
+    if (!item) {
+      setMessage('请先选中一个视频文件', 'warn');
+      render();
+      return;
+    }
+
+    var taskId = item.id;
+    if (state.running[taskId]) return;          // 同一视频已有任务在跑，不重复抽
+    var spec = specOf(item, count);
+    var disk = Store.readMeta(taskId);
+
+    // 完整结果（含已定失败帧）→ 直接复用，不重抽
+    if (Store.isCacheValid(disk, spec)) {
+      if (isMine(taskId)) {
+        state.meta = disk;
+        setMessage(describe(), 'hint');
+        render();
+      }
+      return;
+    }
+
+    state.running[taskId] = true;
+    syncBusy();
+
+    try {
+      var paths = await Capture.ensureFFmpeg();
+      var times, results, duration, gap, truncated, droppedFirst;
+
+      if (Store.isResumable(disk, spec)) {
+        // 续抽：复用时间点与已决结果，只补 pending，不从头开始
+        times = disk.times.slice();
+        results = disk.results.slice();
+        duration = disk.duration;
+        gap = disk.gap;
+        truncated = !!disk.truncated;
+        droppedFirst = !!disk.droppedFirst;
+      } else {
+        duration = await Capture.probeDuration(paths.ffprobe, item.filePath);
+        var p = S.plan(duration, count);
+        if (p.reason === 'too-short' || p.times.length === 0) {
+          if (isMine(taskId)) {
+            setMessage(
+              '视频不足 ' + S.MIN_GAP + ' 秒（时长 ' + S.formatTime(duration) + '），无法生成预览图',
+              'warn'
+            );
+            render();
+          }
           return;
         }
+        times = p.times;
+        gap = p.gap;
+        results = new Array(times.length);
+        truncated = p.truncated;
+        droppedFirst = p.droppedFirst;
       }
-    } catch (e) { /* 缓存检查失败，继续走生成 */ }
 
-    setBusy(true);
-    setMessage('正在读取视频时长…', 'hint');
-    render();
+      Store.ensureItemDir(taskId);
+      var meta = {
+        rule: Store.RULE_VERSION,
+        requested: count,          // 缓存键：用户请求数，不随成功/失败改变
+        count: count,              // 兼容字段
+        duration: duration,
+        gap: gap,
+        times: times,             // 始终保留全部时间点，失败项显示占位卡片
+        results: results,         // true 成功 / false 失败 / undefined 待抽
+        complete: false,          // 草稿；跑完才置 true
+        truncated: truncated,
+        droppedFirst: droppedFirst,
+        sourceSize: spec.sourceSize,
+        sourceMtime: spec.sourceMtime,
+        generatedAt: Date.now()
+      };
+      Store.writeProgress(taskId, meta);   // 先落草稿：切走 / 进程被杀也能恢复
 
-    try {
-      var item = await selectedItem();
-      if (!item) throw new Error('NO_SELECTED_ITEM');
-
-      var paths = await Capture.ensureFFmpeg();
-      var duration = await Capture.probeDuration(paths.ffprobe, item.filePath);
-      var p = S.plan(duration, count);
-
-      if (p.reason === 'too-short' || p.times.length === 0) {
-        setMessage(
-          '视频不足 ' + S.MIN_GAP + ' 秒（时长 ' + S.formatTime(duration) + '），无法生成预览图',
-          'warn'
-        );
+      var skip = results.map(function (r) { return r === true || r === false; });
+      if (isMine(taskId)) {
+        state.meta = meta;                 // 立即显示已完成的帧
+        setMessage(describe(), 'hint');
         render();
-        return;
       }
 
-      Store.ensureItemDir(item.id);
-      var outPaths = p.times.map(function (_, i) { return Store.thumbFile(item.id, i); });
-
-      setMessage('正在抽帧 0 / ' + p.times.length + ' …', 'hint');
-      render();
-
-      var r = await Capture.captureAll(
-        paths.ffmpeg, item.filePath, p.times, outPaths,
+      await Capture.captureAll(
+        paths.ffmpeg, item.filePath, times,
+        times.map(function (_, i) { return Store.thumbFile(taskId, i); }),
         function (done, total) {
+          if (!isMine(taskId)) return;
           setMessage('正在抽帧 ' + done + ' / ' + total + ' …', 'hint');
-          $('status').textContent = state.message;   // 只更新文本，不触发 render / 高度刷新
+          $('status').textContent = state.message;   // 只更新文本，不刷新高度
+        },
+        {
+          skip: skip,                    // 成功或已定失败都不重抽
+          onFrame: function (i, ok) {
+            results[i] = ok;
+            meta.results = results.slice();
+            meta.generatedAt = Date.now();
+            try { Store.writeProgress(taskId, meta); } catch (e) { /* 落盘失败不中断抽帧 */ }
+            if (isMine(taskId)) replacePendingCell(taskId, i, ok, times);
+          }
         }
       );
 
-      var stat = Store.fileStat(item.filePath);
-      var meta = {
-        rule: Store.RULE_VERSION,
-        count: count,
-        duration: duration,
-        gap: p.gap,
-        times: p.times,
-        results: r.results,
-        truncated: p.truncated,
-        droppedFirst: p.droppedFirst,
-        sourceSize: stat.size,
-        sourceMtime: stat.mtimeMs,
-        generatedAt: Date.now()
-      };
-      Store.writeMeta(item.id, meta);
+      meta.complete = true;
+      meta.results = results.slice();
+      meta.failed = results.filter(function (x) { return x === false; }).length;
+      meta.generatedAt = Date.now();
+      Store.writeMeta(taskId, meta);     // 最终结果：可作废 base64 缓存
 
-      state.meta = meta;
-      var note = describe();
-      if (r.failures > 0) note += ' · ' + r.failures + ' 张抽帧失败';
-      setMessage(note, r.failures > 0 ? 'warn' : 'ok');
+      if (isMine(taskId)) {
+        state.meta = meta;
+        setMessage(describe(), meta.failed > 0 ? 'warn' : 'ok');
+        render();
+      }
     } catch (e) {
-      setMessage(friendlyError(e), 'error');
+      if (isMine(taskId)) {
+        setMessage(friendlyError(e), 'error');
+        render();
+      }
     } finally {
-      setBusy(false);
-      render();
+      delete state.running[taskId];
+      syncBusy();
     }
   }
 
   function clearPreview() {
-    if (state.busy || !state.itemId) return;
+    if (!state.itemId || state.running[state.itemId]) return;
     try {
       Store.clearItem(state.itemId);
     } catch (e) {
@@ -393,6 +503,7 @@
       if (id === state.itemId) return;
 
       state.itemId = id;
+      syncBusy();                                    // 控件禁用状态跟随当前显示项
       if (id && state.suppressed[id]) delete state.suppressed[id];  // 重新选择 -> 解除抑制
 
       if (!id) {
@@ -415,11 +526,25 @@
         return;
       }
 
-      var cached = loadCacheIfValid(item, cfg.tileCount);
-      if (cached) {
-        state.meta = cached;
+      var spec = specOf(item, cfg.tileCount);
+      var disk = Store.readMeta(id);
+      if (Store.isCacheValid(disk, spec)) {
+        state.meta = disk;                       // 含已定失败帧的完整结果，直接复用
         setMessage(describe(), 'hint');
         render();          // 重新选择资源：一次刷新
+        return;
+      }
+
+      // 草稿：先显示已完成的帧，再（自动生成开启时）继续补抽缺口
+      if (Store.isResumable(disk, spec)) {
+        state.meta = disk;
+        setMessage(
+          describe() + (state.global.autoGenerate ? ' · 继续生成中' : ' · 点「生成」继续'),
+          'hint'
+        );
+        syncBusy();
+        render();
+        if (state.global.autoGenerate) await generate();
         return;
       }
 

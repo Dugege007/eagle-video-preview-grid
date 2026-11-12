@@ -238,6 +238,9 @@ input[type="number"]:focus { outline: 1px solid var(--accent); }
   font-size: 9px;
 }
 
+/* 草稿里还没抽到的帧：比「抽帧失败」更淡，两者语义不同 */
+.thumb.pending { opacity: .45; }
+
 .time {
   margin-top: 3px;
   text-align: center;

@@ -48,15 +48,64 @@ test('并发上限仍为 2', function () {
   assert.strictEqual(C.MAX_CONCURRENCY, 2);
 });
 
-var failed = 0;
-cases.forEach(function (c) {
-  try {
-    c.fn();
-    console.log('  PASS  ' + c.name);
-  } catch (e) {
-    failed++;
-    console.error('  FAIL  ' + c.name + '\n        ' + e.message);
-  }
+test('skip 跳过已决帧、只抽 pending；onFrame 逐帧回调；进度是真实完成数', async function () {
+  var called = [];
+  var frames = [];
+  var progress = [];
+  var times = [1, 2, 3, 4];
+  var outs = times.map(function (_, i) { return i + '.jpg'; });
+  var r = await C.captureAll('ffmpeg', 'V.mp4', times, outs,
+    function (done, total) { progress.push(done + '/' + total); },
+    {
+      skip: [true, false, true, false],
+      runner: function () {
+        called.push(arguments[2]);            // 第 3 个参数是时间点
+        return Promise.resolve();
+      },
+      onFrame: function (i, ok) { frames.push(i + ':' + ok); }
+    }
+  );
+  assert.deepStrictEqual(called.sort(function (a, b) { return a - b; }), [2, 4]);
+  assert.deepStrictEqual(frames.sort(), ['1:true', '3:true']);
+  assert.strictEqual(progress.length, 4);   // 含 2 次 skip，共 4 次完成事件
+  assert.strictEqual(progress[progress.length - 1], '4/4');
+  assert.strictEqual(r.failures, 0);
+  assert.strictEqual(r.results[0], undefined);   // skip 帧不写 results，由调用方草稿保留
+  assert.strictEqual(r.results[1], true);
 });
-console.log('\n' + (cases.length - failed) + '/' + cases.length + ' passed');
-process.exit(failed ? 1 : 0);
+
+test('单帧失败记为 false，不中断其它帧', async function () {
+  var frames = [];
+  var times = [10, 20, 30];
+  var r = await C.captureAll('ffmpeg', 'V.mp4', times,
+    times.map(function (_, i) { return i + '.jpg'; }),
+    null,
+    {
+      runner: function (ff, fp, t) {
+        if (t === 20) return Promise.reject(new Error('EXIT_1'));
+        return Promise.resolve();
+      },
+      onFrame: function (i, ok) { frames.push(i + ':' + ok); }
+    }
+  );
+  assert.strictEqual(r.failures, 1);
+  assert.ok(frames.indexOf('1:false') >= 0);
+  assert.ok(frames.indexOf('0:true') >= 0);
+  assert.ok(frames.indexOf('2:true') >= 0);
+});
+
+var failed = 0;
+(async function () {
+  for (var i = 0; i < cases.length; i++) {
+    var c = cases[i];
+    try {
+      await c.fn();                          // 同步与异步用例都支持
+      console.log('  PASS  ' + c.name);
+    } catch (e) {
+      failed++;
+      console.error('  FAIL  ' + c.name + '\n        ' + e.message);
+    }
+  }
+  console.log('\n' + (cases.length - failed) + '/' + cases.length + ' passed');
+  process.exit(failed ? 1 : 0);
+})();

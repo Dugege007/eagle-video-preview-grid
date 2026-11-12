@@ -6,6 +6,13 @@
  *   thumbs/<itemId>/config.json       单个视频资源：tileCount（清空预览图不删除）
  *   thumbs/<itemId>/meta.json + jpg   派生缓存：可随时重建 / 清空
  *
+ * v1.5.0：meta.json 同时是「任务草稿」与「最终结果」：
+ *   requested = 用户请求张数（缓存键，不改用户的 config.tileCount）
+ *   complete  = 任务是否跑完；false 表示进行中，可续抽
+ *   results[i]= true 成功 / false 失败（占位卡片，本来就没有 jpg）/ undefined 待抽
+ * 抽帧失败的点是**已定结果**，缓存命中时不再要求它的 jpg 存在。
+ * 旧格式（无 requested / complete）按 results 是否填满来兼容，不升 RULE_VERSION。
+ *
  * 全部位于 eagle.app.userDataPath 下；不写 Eagle 资源库、不碰 metadata.json。
  */
 (function (global) {
@@ -135,17 +142,64 @@
     }
   }
 
-  /** 数量 / 规则版本 / 源文件任一变化，或缺任一缩图 → 缓存失效。 */
-  function isCacheValid(meta, ctx) {
-    if (!meta || !Array.isArray(meta.times) || meta.times.length === 0) return false;
-    if (meta.rule !== RULE_VERSION) return false;
-    if (meta.count !== ctx.count) return false;
+  /**
+   * 兼容读取 meta。旧格式没有 requested / complete：
+   *   requested 用 count 兜底；complete 用「results 每项都是 true/false」推导。
+   * 所以旧版「9 张里 3 张抽帧失败」的缓存可以直接命中，不需要重抽、也不需要迁移文件。
+   */
+  function normalizeMeta(meta) {
+    if (!meta || !Array.isArray(meta.times) || meta.times.length === 0) return null;
+    var results = Array.isArray(meta.results) ? meta.results : [];
+    var full = results.length === meta.times.length && results.every(function (r) {
+      return r === true || r === false;
+    });
+    return {
+      meta: meta,
+      results: results,
+      requested: (typeof meta.requested === 'number') ? meta.requested : meta.count,
+      complete: (typeof meta.complete === 'boolean') ? meta.complete : full
+    };
+  }
+
+  /** 规格键：规则版本 / 请求张数 / 源文件大小与修改时间。 */
+  function sameSpec(meta, ctx) {
+    var n = normalizeMeta(meta);
+    if (!n || meta.rule !== RULE_VERSION) return false;
+    if (n.requested !== ctx.count) return false;
     if (meta.sourceSize !== ctx.sourceSize || meta.sourceMtime !== ctx.sourceMtime) return false;
+    return true;
+  }
+
+  /**
+   * 完整命中：任务已跑完（含失败帧），且每张「成功」的 jpg 都存在且非空。
+   * results[i] === false 的帧是已定失败，占位显示，不检查文件 —— 这是 v1.5.0
+   * 修掉「只要有一张失败就永远重抽全部」的关键。
+   */
+  function isCacheValid(meta, ctx) {
+    var n = normalizeMeta(meta);
+    if (!n || !n.complete || !sameSpec(meta, ctx)) return false;
     var fs = node().fs;
-    for (var i = 0; i < meta.times.length; i++) {
-      if (!fs.existsSync(thumbFile(ctx.itemId, i))) return false;
+    for (var i = 0; i < n.meta.times.length; i++) {
+      if (n.results[i] === false) continue;
+      if (n.results[i] !== true) return false;      // 还有 pending，不该命中
+      try {
+        if (fs.statSync(thumbFile(ctx.itemId, i)).size <= 0) return false;
+      } catch (e) {
+        return false;
+      }
     }
     return true;
+  }
+
+  /** 规格一致且仍是草稿 → 可续抽：跳过已决帧，只补 pending。 */
+  function isResumable(meta, ctx) {
+    var n = normalizeMeta(meta);
+    return !!n && !n.complete && sameSpec(meta, ctx);
+  }
+
+  /** 逐帧落盘用：只写 meta，不清空 base64 缓存（已有的图仍然有效）。 */
+  function writeProgress(itemId, meta) {
+    writeJson(metaFile(itemId), meta);
   }
 
   /**
@@ -193,7 +247,11 @@
     thumbFile: thumbFile,
     readMeta: readMeta,
     writeMeta: writeMeta,
+    writeProgress: writeProgress,
     fileStat: fileStat,
+    normalizeMeta: normalizeMeta,
+    sameSpec: sameSpec,
+    isResumable: isResumable,
     isCacheValid: isCacheValid,
     thumbDataURL: thumbDataURL,
     invalidateThumbs: invalidateThumbs,

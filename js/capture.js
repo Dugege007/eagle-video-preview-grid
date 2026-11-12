@@ -112,23 +112,42 @@
     await run(ffmpeg, buildCaptureArgs(filePath, t, outPath), 60000);
   }
 
-  async function captureAll(ffmpeg, filePath, times, outPaths, onProgress) {
+  /**
+   * opts.skip[i]     = 已决帧（成功或已定失败）→ 直接跳过，不重抽
+   * opts.onFrame(i,ok)= 每完成一帧回调，供调用方逐帧落盘
+   * opts.runner      = 注入单点抽帧实现，便于单测（默认真正 spawn FFmpeg）
+   * onProgress       = 真实完成计数（含 skip），不再是「已分配索引 i+1」
+   */
+  async function captureAll(ffmpeg, filePath, times, outPaths, onProgress, opts) {
+    opts = opts || {};
+    var runner = opts.runner || captureOne;
+    var skip = opts.skip || [];
     var results = new Array(times.length);
     var next = 0;
+    var completed = 0;
     var failures = 0;
 
     async function worker() {
       while (true) {
         var i = next++;
         if (i >= times.length) return;
+        if (skip[i]) {
+          completed++;
+          if (onProgress) onProgress(completed, times.length);
+          continue;
+        }
+        var ok;
         try {
-          await captureOne(ffmpeg, filePath, times[i], outPaths[i]);
-          results[i] = true;
+          await runner(ffmpeg, filePath, times[i], outPaths[i]);
+          ok = true;
         } catch (e) {
-          results[i] = false;
+          ok = false;
           failures++;
         }
-        if (onProgress) onProgress(i + 1, times.length);
+        results[i] = ok;
+        completed++;
+        if (opts.onFrame) opts.onFrame(i, ok);
+        if (onProgress) onProgress(completed, times.length);
       }
     }
 
