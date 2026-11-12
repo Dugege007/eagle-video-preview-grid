@@ -1,12 +1,12 @@
 {
   "id": "a7e3c2f0-4b18-4d6a-9e52-6c1b8f30d947",
-  "version": "0.3.2",
+  "version": "1.0.0",
   "platform": "all",
   "arch": "all",
   "name": "视频预览图",
   "logo": "/logo.png",
   "keywords": ["video", "preview", "grid", "thumbnail", "预览图", "缩略图"],
-  "devTools": true,
+  "devTools": false,
   "dependencies": ["ffmpeg"],
   "preview": {
     "mp4,mov,m4v,webm,mkv,avi,flv,wmv": {
