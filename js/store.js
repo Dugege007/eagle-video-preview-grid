@@ -1,14 +1,18 @@
 /**
- * store.js — 派生缓存读写
+ * store.js — 设置与派生缓存读写
  *
- * 设计前提：本期不做自定义描述，时间点是 (时长, 数量) 的确定性函数，
- * 因此不保存任何用户数据；换机 / Eaglepack 迁移后自动重算重建即可。
- * 全部文件位于 eagle.app.userDataPath 下，不写 Eagle 资源库、不碰 metadata.json。
+ * 作用域（v0.2.0）：
+ *   settings.json                     全局：autoGenerate / expanded
+ *   thumbs/<itemId>/config.json       单个视频资源：tileCount（清空预览图不删除）
+ *   thumbs/<itemId>/meta.json + jpg   派生缓存：可随时重建 / 清空
+ *
+ * 全部位于 eagle.app.userDataPath 下；不写 Eagle 资源库、不碰 metadata.json。
  */
 (function (global) {
   'use strict';
 
   var PLUGIN_DIR = 'eagle-video-preview-grid';
+  var RULE_VERSION = 'v1';   // 采样规则版本；算法改动时递增，旧缓存自动失效
 
   function node() {
     if (typeof require !== 'function') throw new Error('NODE_UNAVAILABLE');
@@ -42,18 +46,29 @@
     return String(id || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_');
   }
 
+  /* ---------- 全局设置 ---------- */
+
   function settingsFile() {
     return node().path.join(root(), 'settings.json');
   }
 
-  function getSettings() {
+  function getGlobal() {
     var s = readJson(settingsFile(), {});
-    return { tileCount: global.Sampler.clampCount(s.tileCount) };
+    return {
+      autoGenerate: s.autoGenerate === true,   // 默认关闭
+      expanded: s.expanded === true            // 默认收起
+    };
   }
 
-  function setSettings(s) {
-    writeJson(settingsFile(), { tileCount: global.Sampler.clampCount(s.tileCount) });
+  function setGlobal(patch) {
+    var cur = getGlobal();
+    writeJson(settingsFile(), {
+      autoGenerate: typeof patch.autoGenerate === 'boolean' ? patch.autoGenerate : cur.autoGenerate,
+      expanded: typeof patch.expanded === 'boolean' ? patch.expanded : cur.expanded
+    });
   }
+
+  /* ---------- 单个视频资源的配置 ---------- */
 
   function itemDir(itemId) {
     return node().path.join(root(), 'thumbs', safeId(itemId));
@@ -62,6 +77,23 @@
   function ensureItemDir(itemId) {
     ensureDir(itemDir(itemId));
   }
+
+  function configFile(itemId) {
+    return node().path.join(itemDir(itemId), 'config.json');
+  }
+
+  function getItemConfig(itemId) {
+    var c = readJson(configFile(itemId), {});
+    return { tileCount: global.Sampler.clampCount(c.tileCount) };
+  }
+
+  function setItemConfig(itemId, cfg) {
+    writeJson(configFile(itemId), {
+      tileCount: global.Sampler.clampCount(cfg.tileCount)
+    });
+  }
+
+  /* ---------- 派生缓存 ---------- */
 
   function metaFile(itemId) {
     return node().path.join(itemDir(itemId), 'meta.json');
@@ -88,9 +120,10 @@
     }
   }
 
-  /** 参数或源文件任一变化即判定缓存失效；缺任一缩图也失效。 */
+  /** 数量 / 规则版本 / 源文件任一变化，或缺任一缩图 → 缓存失效。 */
   function isCacheValid(meta, ctx) {
     if (!meta || !Array.isArray(meta.times) || meta.times.length === 0) return false;
+    if (meta.rule !== RULE_VERSION) return false;
     if (meta.count !== ctx.count) return false;
     if (meta.sourceSize !== ctx.sourceSize || meta.sourceMtime !== ctx.sourceMtime) return false;
     var fs = node().fs;
@@ -100,27 +133,39 @@
     return true;
   }
 
-  /**
-   * 用 base64 data URL 而不是 file:/// 路径：规避 Windows 中文路径 / 空格 / # 的转义问题。
-   */
+  /** 用 base64 data URL，规避 Windows 中文路径 / 空格 / # 的转义问题。 */
   function thumbDataURL(itemId, index) {
     var buf = node().fs.readFileSync(thumbFile(itemId, index));
     return 'data:image/jpeg;base64,' + buf.toString('base64');
   }
 
-  function removeThumbs(itemId, count) {
-    var fs = node().fs;
-    for (var i = 0; i < count; i++) {
-      try { fs.unlinkSync(thumbFile(itemId, i)); } catch (e) { /* 已不存在 */ }
-    }
+  /**
+   * 清空某个视频已生成的预览图：删除所有 jpg 与 meta.json，
+   * 但保留 config.json（该视频自己的生成数量）。
+   */
+  function clearItem(itemId) {
+    var n = node();
+    var fs = n.fs;
+    var dir = itemDir(itemId);
+    try {
+      fs.readdirSync(dir).forEach(function (f) {
+        if (/^\d+\.jpg$/i.test(f)) {
+          try { fs.unlinkSync(n.path.join(dir, f)); } catch (e) { /* 已不存在 */ }
+        }
+      });
+    } catch (e) { /* 目录不存在 */ }
+    try { fs.unlinkSync(metaFile(itemId)); } catch (e) { /* 已不存在 */ }
   }
 
   var api = {
     PLUGIN_DIR: PLUGIN_DIR,
+    RULE_VERSION: RULE_VERSION,
     root: root,
+    getGlobal: getGlobal,
+    setGlobal: setGlobal,
     ensureItemDir: ensureItemDir,
-    getSettings: getSettings,
-    setSettings: setSettings,
+    getItemConfig: getItemConfig,
+    setItemConfig: setItemConfig,
     metaFile: metaFile,
     thumbFile: thumbFile,
     readMeta: readMeta,
@@ -128,7 +173,7 @@
     fileStat: fileStat,
     isCacheValid: isCacheValid,
     thumbDataURL: thumbDataURL,
-    removeThumbs: removeThumbs
+    clearItem: clearItem
   };
 
   global.Store = api;

@@ -1,5 +1,8 @@
-/* Video Preview Grid — 检查器区块样式
- * manifest 的 inspector.height 固定为 320，展开时用网格区域内部滚动，不撑高 iframe。
+/* Video Preview Grid — 检查器区块样式 (v0.2.0)
+ *
+ * manifest 的 inspector.height 仍是固定的「默认高度」；插件内部让内容按实际
+ * 张数自然排布（0 张时网格高度 0），并尽力通过 frameElement 同步宿主 iframe 高度。
+ * body 背景透明，内容变矮后剩余空间透出 Eagle 检查器底色，不会是一块突兀的空白面板。
  */
 
 html {
@@ -11,7 +14,7 @@ html {
 body {
   margin: 0;
   padding: 0;
-  background: var(--bg);
+  background: transparent;
   color: var(--fg);
 }
 
@@ -46,7 +49,8 @@ body[theme="DARK"] {
 .wrap {
   display: flex;
   flex-direction: column;
-  height: 320px;
+  height: auto;              /* 内容自然高度，不再固定 320 */
+  min-height: 0;
   box-sizing: border-box;
   padding: 8px 10px;
 }
@@ -58,10 +62,65 @@ body[theme="DARK"] {
   flex: none;
 }
 
+.toolbar.secondary { margin-top: 6px; }
+
 .title {
   font-size: 12px;
   font-weight: 600;
   margin-right: auto;
+}
+
+.spacer { flex: 1; }
+
+/* 自动生成开关 */
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--sub);
+  font-size: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.track {
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--btn);
+  transition: background .15s;
+}
+
+.track::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--sub);
+  transition: transform .15s;
+}
+
+.switch input:checked + .track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch input:checked + .track::after {
+  transform: translateX(11px);
+  background: #fff;
 }
 
 .count {
@@ -84,9 +143,7 @@ input[type="number"] {
   font-family: inherit;
 }
 
-input[type="number"]:focus {
-  outline: 1px solid var(--accent);
-}
+input[type="number"]:focus { outline: 1px solid var(--accent); }
 
 .btn {
   border: 1px solid var(--line);
@@ -133,14 +190,16 @@ input[type="number"]:focus {
 .status.warn { color: #d9922b; }
 .status.error { color: #e05561; }
 
+/* 高度由 applyGridHeight() 按实测行高设置；0 张时为 0px */
 .grid {
-  flex: 1 1 auto;
-  overflow-y: auto;
+  flex: none;
+  height: 0;
+  margin-top: 0;
+  overflow-y: hidden;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px 6px;
   align-content: start;
-  margin-top: 6px;
   padding-right: 2px;
 }
 
@@ -176,18 +235,14 @@ input[type="number"]:focus {
   letter-spacing: .02em;
 }
 
+/* 只有超过 9 张时才出现，占「展开按钮的高度」 */
 .footer {
   flex: none;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   min-height: 18px;
   margin-top: 4px;
   border-top: 1px solid var(--line);
   padding-top: 4px;
-}
-
-.counter {
-  font-size: 9px;
-  color: var(--sub);
 }

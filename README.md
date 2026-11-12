@@ -1,11 +1,11 @@
 # Eagle Video Preview Grid
 
-> 给 Eagle 检查器加一块「视频预览图」区块：点一次「生成」，按等距时间点自动抽出静态帧，一眼扫完这个视频的大致内容。
+> 给 Eagle 检查器加一块「视频预览图」区块：按等距时间点自动抽出静态帧，一眼扫完这个视频的大致内容。
 
 - **类型**：Eagle 4.0 检查器扩展插件（`preview.<ext>.inspector`），只新增区块，不替换 / 干扰原生视频播放器
-- **版本**：0.1.0（2026-11-12）
+- **版本**：0.2.0（2026-11-12）
 - **许可**：MIT
-- **状态**：⚠️ 代码骨架完成、采样算法已单测通过，**尚未在真实 Eagle 中安装实测**（见「已验证 / 未验证」）
+- **状态**：✅ **已在真实 Eagle 中安装并实测跑通**（预览栏目正常显示、抽帧与网格工作良好）；v0.2.0 新增交互待用户回归验证
 
 ---
 
@@ -15,23 +15,26 @@
 
 | | VideoTileKun Inspector | 本插件 |
 | --- | --- | --- |
-| 设置项 | 网格大小范围、抽帧间隔秒、画质、hover 缩放、亮度/对比度/饱和度… | **只有「自动生成数量」** |
+| 设置项 | 网格大小范围、抽帧间隔秒、画质、hover 缩放、亮度/对比度/饱和度… | **只有「生成数量」+「自动生成」开关** |
 | 取点方式 | 固定间隔（需自己调） | 按视频时长自动分段，内置最低 5 秒保护 |
 | 预览形态 | 缩图 + hover 从该帧播放 | **纯静态图**，完全不加载 `<video>` |
 | 文字说明 | 单张 tag（overlay 显示） | 本期不做 |
-| 触发 | 一键生成 | 一键生成 |
+| 触发 | 一键生成 | 手动「生成」或选中视频时自动生成 |
 | 依赖 | 官方 FFmpeg 插件 | 官方 FFmpeg 插件 |
 
 ---
 
-## 二、本期范围
+## 二、范围
 
 **做**
 
-- 一键自动生成静态预览图，图下小字时间码（`MM:SS` / `HH:MM:SS`）
-- 唯一设置项「自动生成数量」，默认 **9**，范围 1–30
-- 默认最多显示前 **9** 张，超出可展开 / 折叠（网格内部滚动，不撑高 iframe）
-- 6 套 Eagle 主题适配、缓存自动失效与重建
+- 静态预览图网格 + 图下小字时间码（`MM:SS` / `HH:MM:SS`）
+- 单个视频各自的「生成数量」，默认 **9**，范围 1–30
+- 「自动生成」开关（默认关闭）：开启后隐藏手动「生成」按钮，选择视频时自动生成；数量确认后自动刷新
+- 「清空」按钮：清空已生成预览图；清空后须重新选择该视频才会再次自动生成
+- 网格高度随张数变化（0 张为 0，最多 3 行）；超过 9 张才显示「展开 / 收起」
+- 全局状态（自动生成开关、展开 / 折叠）与单项配置（数量）分离
+- 缓存命中直接复用不重复抽帧；6 套 Eagle 主题适配
 
 **明确不做**
 
@@ -42,35 +45,61 @@
 | 可编辑文字描述 | 本期不需要；后续口径已定，见「路线图」 |
 | hover 播放、右键菜单、单张删除 / 重抽、章节导出 | 用不上，避免设置与交互膨胀 |
 
+### 关于高度（官方边界，重要）
+
+需求里的「预览图区域高度」和「整个检查器外框高度」是两件事：
+
+| 层 | 能否控制 | 依据 |
+| --- | --- | --- |
+| **预览图网格区域** | ✅ 完全可控 | 插件自己的 DOM：0 张 → `0px`；1–3 / 4–6 / ≥7 张 → 1 / 2 / 3 行；展开后仍封顶 3 行、内部滚动。行高按运行时实测单元格高度计算 |
+| **整个检查器区块（iframe）** | ⚠️ 官方无运行时改高通道 | `eagle.window.setSize` / `setBounds` 只作用于**插件窗口**（BrowserWindow），检查器插件没有 `main`；官方与第三方教程都只把 `inspector.height` 描述为「默认高度、建议调到 120/150 这种整数」 |
+
+本插件做了两层处理：内容高度自然排布 + `body` 背景透明（留白透出 Eagle 检查器底色），并尝试通过 `window.frameElement.style.height` **尽力而为**地同步宿主 iframe 高度。若宿主是 webview / 不允许访问，则静默退回 manifest 固定 `height`。**外框能否真正随之变矮，需在真实 Eagle 中实测**。
+
 ---
 
 ## 三、安装
 
-1. 在 Eagle 插件中心安装官方 **「FFmpeg 依赖插件」**（本插件 `manifest.json` 声明了 `dependencies: ["ffmpeg"]`）。
-2. 把本仓库整个目录复制到 Eagle 插件目录（入口：插件 → 开发者选项 → 打开插件文件夹；**具体路径待实测**）。
+1. 在 Eagle 插件中心安装官方 **「FFmpeg 依赖插件」**（`manifest.json` 声明了 `dependencies: ["ffmpeg"]`）。本机已装：`%APPDATA%\Eagle\Plugins\ffmpeg-win-x64\` 内含 `ffmpeg.exe` + `ffprobe.exe`。
+2. 把本仓库整个目录放进 Eagle 插件目录 `C:\Users\[用户名]\AppData\Roaming\Eagle\Plugins\`（入口：插件 → 开发者选项 → 打开插件文件夹）。
+   - 开发阶段可用目录联接避免反复复制（本机已这样装）：
+     ```powershell
+     New-Item -ItemType Junction -Path "$env:APPDATA\Eagle\Plugins\eagle-video-preview-grid" -Target "D:\WorkBuddy\Eagle插件开发\eagle-video-preview-grid"
+     ```
+   - ⚠️ **绝不在 Eagle 界面里点本插件的「卸载 / 删除」**，也不要对链接用 `Remove-Item -Recurse` / `rm -rf`（会穿透 junction 删到源码）。安全卸载：`[System.IO.Directory]::Delete("$env:APPDATA\Eagle\Plugins\eagle-video-preview-grid")`。
 3. 重启 Eagle，选中一个视频 → 右侧检查器出现「预览图」区块。
-4. 首次可把区块拖到想要的位置（Eagle 4.0 检查器支持拖拽排序；manifest 无 `order` / `position` 字段，插件无法指定默认位置）。
+4. 首次可把区块拖到想要的位置（Eagle 4.0 检查器支持拖拽排序；manifest 无 `order` / `position` 字段）。
 
-**环境要求**：Eagle 4.0 build22+；官方 FFmpeg 依赖插件。优先 Windows（社区 FFmpeg 插件在 Windows 已验证）。
-
-> 若区块里提示「当前检查器环境无法调用 Node 模块」，说明该环境不允许 `require('child_process')`，需要改为后台服务插件专职抽帧（见「已验证 / 未验证」）。
+**环境要求**：Eagle 4.0 build22+；官方 FFmpeg 依赖插件。优先 Windows。
 
 ---
 
 ## 四、使用
 
-1. 选中视频 → 区块显示「尚未生成预览图，点『生成』按钮自动生成」。
-2. 需要时改「数量」（默认 9）→ 点「生成」。
-3. 生成后显示缩图网格 + 时间码；数量改了或视频文件被替换，缓存自动失效并提示重新生成。
-4. 超过 9 张时右下角出现「展开 ▾ / 收起 ▴」，状态在切换选中项时重置。
+| 操作 | 行为 |
+| --- | --- |
+| 点「生成」 | 按当前视频自己的数量设置抽帧 |
+| 开启「自动生成」 | 隐藏手动「生成」按钮；之后**每次点击选择一个视频**自动生成其预览图（开启当下不立即生成） |
+| 修改「数量」并确认（失焦 / 回车） | 自动生成开启 → 立即按新数量刷新；关闭 → 提示点「生成」 |
+| 已有预览图且符合数量 / 规则 / 源文件 | 直接复用缓存，**不重复抽帧** |
+| 点「清空」 | 删除该视频全部缩图与生成记录，网格高度归 0；保留该视频的数量设置 |
+| 清空之后 | 不会再次自动生成，**直到重新选择该视频**（切到别的再切回来、或经过无选中再选回） |
+| 超过 9 张 | 出现「展开 ▾ / 收起 ▴」；展开后网格仍 3 行高，其余卡片内部滚动 |
 
-缓存命中时**直接显示**，不会重复抽帧。
+### 状态作用域
+
+| 状态 | 作用域 | 存储位置 |
+| --- | --- | --- |
+| 自动生成开关（默认关闭） | **全局**，切换视频保持 | `settings.json` |
+| 展开 / 折叠 | **全局**，切换视频保持 | `settings.json` |
+| 生成数量（默认 9） | **单个视频资源**，互不干扰；清空不影响 | `thumbs/<itemId>/config.json` |
+| 清空后的抑制标记 | 内存态，重新选择该视频时解除 | 不落盘 |
 
 ---
 
 ## 五、采样算法
 
-输入：`T` = 视频时长（秒，`ffprobe -show_format` 取 `format.duration`）、`N` = 自动生成数量（默认 9）；常量 `MIN_GAP = 5`。
+输入：`T` = 视频时长（秒，`ffprobe -show_format` 取 `format.duration`）、`N` = 生成数量（默认 9）；常量 `MIN_GAP = 5`。
 
 ```
 gap0 = T / (N + 1)              // 分成 N+1 段，取中间 N 个连接处
@@ -103,18 +132,20 @@ t_i  = T - M*gap + (i-1)*gap    // i = 1..M，从尾部往前对齐
 
 ## 六、数据与迁移
 
-**本期不做自定义描述，因此一条用户数据都不需要保存。** 时间点是 `(时长, 数量)` 的确定性函数，换机、重装或 Eaglepack 迁移后自动重算重建，不存在「数据丢失」问题。
+时间点是 `(时长, 数量)` 的确定性函数，缩图是可丢弃的派生缓存；换机 / 重装 / Eaglepack 迁移后自动重算重建，不存在「预览图丢失」问题。
 
 ```
 {eagle.app.userDataPath}/eagle-video-preview-grid/
-├── settings.json                  { "tileCount": 9 }
+├── settings.json                  { "autoGenerate": false, "expanded": false }   ← 全局
 └── thumbs/<itemId>/
-    ├── meta.json                  count / duration / gap / times / results
+    ├── config.json                { "tileCount": 9 }                            ← 单项，清空保留
+    ├── meta.json                  rule / count / duration / gap / times / results
     │                              / sourceSize / sourceMtime / generatedAt
     └── 0.jpg … M-1.jpg
 ```
 
-- `count`、`sourceSize`、`sourceMtime` 任一变化，或任一缩图缺失 → 缓存失效，提示重新生成。
+- `rule`（采样规则版本）、`count`、`sourceSize`、`sourceMtime` 任一变化，或任一缩图缺失 → 缓存失效并重新生成。
+- 「清空」只删 `*.jpg` 与 `meta.json`，**保留 `config.json`**。
 - **不写 Eagle 资源库、不碰 `metadata.json`**（官方最佳实践明文禁止直接修改资源库文件）。
 - 缩图用 base64 data URL 渲染，规避 Windows 中文路径 / 空格 / `#` 的 `file:///` 转义问题。
 
@@ -124,13 +155,14 @@ t_i  = T - M*gap + (i-1)*gap    // i = 1..M，从尾部往前对齐
 
 | 项 | 状态 | 依据 |
 | --- | --- | --- |
-| 采样算法正确性 | ✅ 已验证 | `test/sampler.test.js`：11 组断言 + 1…600s × 1…30 张穷举不变量（间隔 ≥5s、首点 ≥1s、末点 < 时长） |
-| 官方 API 字段与签名 | ✅ 文档核对 | 见「依据」 |
-| 在真实 Eagle 中安装并跑通 | ❌ **未验证** | 本仓库刚建立，尚未实测 |
-| `dependencies: ["ffmpeg"]` 对检查器插件生效 | ❌ **未验证** | 官方示例只给窗口插件与缩略图插件；若不生效需拆 `serviceMode` 后台插件 |
-| 检查器 iframe 能否 `require('child_process')` | ⚠️ **推断可用，待实测** | 官方格式扩展 `viewer.html` 示例用了 `require()`；VideoTileKun Inspector 单插件即可抽帧（中可信）。代码已做能力检测与明确报错 |
-| `getPaths()` 返回 `{ffmpeg, ffprobe}` | ✅ 官方文档明写 | FFmpeg extraModule 示例 |
-| 点击让 Eagle **主播放器**跳到时间点 | ❌ 官方不支持 | `item.open()` 只有 `window` 参数；Plugin API 与本地 HTTP API 均无播放控制 → 本期不做 |
+| 采样算法正确性 | ✅ 已验证 | `test/sampler.test.js`：11 组断言 + 1…600s × 1…30 张穷举不变量 |
+| 布局规则（可见张数 / 行数 / 高度 / 展开按钮） | ✅ 已验证 | `test/layout.test.js`：5 组断言 + 0…30 张高度上界穷举 |
+| 在真实 Eagle 中安装并跑通 v0.1.0 | ✅ **用户实测通过** | 2026-11-12：预览栏目正常显示、已有功能良好 |
+| junction 安装被 Eagle 识别 | ✅ **用户实测通过** | 同上（此前担心的 `isDirectory()` 过滤未发生） |
+| `require('child_process')` / FFmpeg 抽帧链路 | ✅ 间接验证 | 预览图已能生成显示，说明 Node 集成与 `getPaths()` 均可用 |
+| v0.2.0 新增交互（高度自适应、清空、自动生成、作用域） | ⏳ **待回归验证** | 代码与单测完成，需重启 Eagle 实测 |
+| 宿主 iframe 高度能否随之变矮 | ⚠️ **未验证** | `window.frameElement` 尽力而为尝试；官方无运行时改高 API，失败则保持固定 `height` |
+| 点击让 Eagle **主播放器**跳到时间点 | ❌ 官方不支持 | `item.open()` 只有 `window` 参数；Plugin API 与本地 HTTP API 均无播放控制 |
 | 全局快捷键抓播放器当前帧 | ❌ 官方不支持 | 拿不到 `currentTime`、iframe 无焦点、7 个 event 无键盘 / 播放器事件 |
 | 改原生标注栏 / 给原生笔记塞图片 | ❌ 插件做不到 | 只能在检查器新增自己的 iframe 区块；`addComment` 无图片字段 |
 | 用 `<video>` + canvas 抽帧 | ❌ 不用 | 检查器与主播放器同属 Chromium 107，不被管线支持的编码一样解不动；FFmpeg 是独立解码链路 |
@@ -140,19 +172,21 @@ t_i  = T - M*gap + (i-1)*gap    // i = 1..M，从尾部往前对齐
 ## 八、开发
 
 ```bash
-npm test          # 等价于 node test/sampler.test.js，无第三方依赖
+npm test                    # node test/sampler.test.js && node test/layout.test.js，无第三方依赖
 python tools/make_logo.py   # 重新生成 logo.png（仅用 Python 标准库）
 ```
 
 ```
-├── manifest.json          # 检查器插件声明
+├── manifest.json          # 检查器插件声明（height 320、dependencies ffmpeg）
 ├── index.html             # 区块入口
-├── css/style.css          # 主题适配 + 3 列网格
+├── css/style.css          # 主题适配 + 3 列网格 + 动态高度
 ├── js/sampler.js          # 确定性采样（纯函数，浏览器 / Node 双用）
-├── js/store.js            # 派生缓存读写
+├── js/layout.js           # 网格布局纯函数（可见张数 / 行数 / 高度）
+├── js/store.js            # 全局设置 + 单项配置 + 派生缓存
 ├── js/capture.js          # ffprobe 取时长 + FFmpeg 抽帧
-├── js/main.js             # UI、轮询、生成流程
-├── test/sampler.test.js   # 算法单测
+├── js/main.js             # UI、轮询、生成 / 清空 / 自动生成流程
+├── test/sampler.test.js   # 采样单测
+├── test/layout.test.js    # 布局单测
 ├── tools/make_logo.py     # logo 生成脚本
 └── logo.png               # manifest 图标
 ```
@@ -161,7 +195,7 @@ python tools/make_logo.py   # 重新生成 logo.png（仅用 Python 标准库）
 
 ## 九、路线图（P0 / P1 / P2）
 
-- **P0（本期）**：骨架 + 采样 + 抽帧缓存 + 网格 / 折叠 + 数量设置 + 主题适配；**实测第七节中 4 项未验证点**。
+- **P0**：v0.1.0 已在真实 Eagle 跑通；v0.2.0 新增交互回归验证，重点看「外框高度」「清空后抑制」「全局 / 单项作用域」三项。
 - **P1**：可编辑自定义描述、单张重抽 / 删除、失败重试、单次 FFmpeg 批量 `select` 抽帧优化。
 - **P2**：场景切点检测挑「精彩段」（`select='gt(scene,0.4)'`）、自定义取帧 + 快捷键（仅唤起 / 刷新）、hover 看大图、导出缩图与时间码清单。
 
@@ -177,10 +211,11 @@ python tools/make_logo.py   # 重新生成 logo.png（仅用 Python 标准库）
 
 | 可信度 | 来源 |
 | --- | --- |
-| 高 · 官方 API 文档 | [检查器插件](https://developer.eagle.cool/plugin-api/zh-cn/get-started/plugin-types/inspector)、[manifest 完整配置](https://developer.eagle.cool/plugin-api/zh-cn/tutorial/manifest)、[item](https://developer.eagle.cool/plugin-api/zh-cn/api/item)、[app（`userDataPath` / `theme`）](https://developer.eagle.cool/plugin-api/zh-cn/api/app)、[FFmpeg extraModule](https://developer.eagle.cool/plugin-api/zh-cn/extra-module/ffmpeg)、[格式扩展（`viewer` 可用 `require`）](https://developer.eagle.cool/plugin-api/zh-cn/get-started/plugin-types/preview)、[event（仅 7 个）](https://developer.eagle.cool/plugin-api/zh-cn/api/event) |
-| 高 · 官方帮助中心 | [视频播放器快捷键](https://docs-cn.eagle.cool/article/1424-video-player)、[如何设置插件快捷键](https://cn.eagle.cool/support/article/how-to-set-up-plugin-shortcuts) |
+| 高 · 官方 API 文档 | [检查器插件](https://developer.eagle.cool/plugin-api/zh-cn/get-started/plugin-types/inspector)、[manifest 完整配置](https://developer.eagle.cool/plugin-api/zh-cn/tutorial/manifest)、[item](https://developer.eagle.cool/plugin-api/zh-cn/api/item)、[app（`userDataPath` / `theme`）](https://developer.eagle.cool/plugin-api/zh-cn/api/app)、[window（`setSize` 仅插件窗口）](https://developer.eagle.cool/plugin-api/zh-cn/api/window)、[FFmpeg extraModule](https://developer.eagle.cool/plugin-api/zh-cn/extra-module/ffmpeg)、[格式扩展（`viewer` 可用 `require`）](https://developer.eagle.cool/plugin-api/zh-cn/get-started/plugin-types/preview)、[event（仅 7 个）](https://developer.eagle.cool/plugin-api/zh-cn/api/event) |
+| 高 · 官方帮助中心 | [插件安装位置](https://tw.eagle.cool/support/article/where-are-eagle-plugins-installed-on-my-computer)、[视频播放器快捷键](https://docs-cn.eagle.cool/article/1424-video-player) |
+| 中 · 第三方教程 | [检查器插件开发详解](https://www.wanxiangyundang.top/read/eagle-plugin-dev/c02-03-inspector-plugin)（`height` 为默认高度、建议 100–150） |
 | 中 · 社区开源实现 | [VideoTileKun Inspector](https://community-jp.eagle.cool/plugin/054118d7-01e3-403f-a69e-4d7da614508b)、[用户指南](https://github.com/animtools/eagle-plugin-support/blob/main/docs/VideoTileKun-plugins/USER_GUIDE.md) |
-| 推断 · 待实测 | 检查器插件可 `require('child_process')`、`dependencies` 对 inspector 生效、缓存目录权限 |
+| 推断 · 待实测 | 宿主 iframe 的 `frameElement` 可否运行时改高 |
 
 ---
 
