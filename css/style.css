@@ -29,6 +29,7 @@ body[theme="LIGHTGRAY"] {
   --accent: #2f6feb;
   --placeholder: #f0f1f3;
   --danger: #d84554;
+  --reset: #df7b1c;
 }
 
 body[theme="GRAY"],
@@ -44,6 +45,7 @@ body[theme="DARK"] {
   --accent: #5b8cff;
   --placeholder: #282d36;
   --danger: #e05561;
+  --reset: #e8913a;
 }
 
 [hidden] { display: none !important; }
@@ -64,7 +66,7 @@ body[theme="DARK"] {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;          /* v1.8.0：多一个「重置」按钮，略收紧以维持单行 */
   flex: none;
   flex-wrap: nowrap;   /* 单行：去掉「预览图」label 后所有控件排在一行 */
 }
@@ -155,7 +157,7 @@ input[type="number"]:focus { outline: 1px solid var(--accent); }
   color: var(--fg);
   font-size: 10px;
   font-family: inherit;
-  padding: 3px 7px;
+  padding: 3px 6px;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -179,6 +181,15 @@ input[type="number"]:focus { outline: 1px solid var(--accent); }
 }
 
 .btn.danger:hover:not(:disabled) { filter: brightness(1.1); }
+
+/* 重置＝回到按时长自动，用橙色与「生成 / 清空」区分 */
+.btn.warn {
+  background: var(--reset);
+  border-color: var(--reset);
+  color: #fff;
+}
+
+.btn.warn:hover:not(:disabled) { filter: brightness(1.08); }
 
 .btn.link {
   background: transparent;

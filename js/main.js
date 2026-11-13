@@ -1,6 +1,9 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.7.0)
+ * main.js — 检查器区块 UI 与生命周期 (v1.8.0)
  *
+ * v1.8.0：
+ *   - 工具栏新增常显橙色「重置」：config 回到 auto:true（按时长分桶），
+ *     保留所有已生成预览图、立即按新数量刷新；syncBusy 只禁用、永不隐藏
  * v1.7.0：
  *   - 右键菜单扩为三项「设为视频封面 / 复制 / 另存为」，三项统一基于
  *     从视频该时间点重新抽出的**不缩放原尺寸帧**（192px 缩图太糊，不再用于封面）
@@ -69,6 +72,7 @@
   function syncBusy() {
     var busy = !!(state.itemId && state.running[state.itemId]);
     $('generate').disabled = busy;
+    $('reset').disabled = busy;      // 抽帧中禁用，但按钮始终显示
     $('clear').disabled = busy;
     $('tileCount').disabled = busy;
     $('autoGenerate').disabled = busy;
@@ -566,6 +570,41 @@
     }
   }
 
+  /**
+   * v1.8.0「重置」：把该视频的生成张数恢复为按 8 档时长分桶自动决定（config.auto=true），
+   * 但**不删除任何已生成的预览图**（与「清空」的区别：清空删所有规格并抑制自动生成）。
+   * 随后立即按新数量刷新；已有对应规格缓存会直接复用、不重抽。
+   * 按钮常显，不受「自动生成」开关影响（syncControls 不碰它）。
+   */
+  async function resetCount() {
+    var id = state.itemId;
+    if (!id) {
+      setMessage('请先选中一个视频文件', 'warn');
+      render();
+      return;
+    }
+    if (state.running[id]) return;        // 抽帧中 syncBusy 已禁用，这里再兜一层
+
+    try {
+      Store.setItemConfig(id, { auto: true, activeCount: null });
+    } catch (e) {
+      setMessage(friendlyError(e), 'error');
+      render();
+      return;
+    }
+    if (state.suppressed[id]) delete state.suppressed[id];  // 重置＝恢复自动，解除清空抑制
+    state.autoMode = true;
+    syncControls();
+
+    await generate();                     // 内部按分桶算 count、命中缓存则直接复用
+
+    if (state.kind === 'error' || state.kind === 'warn') return;  // 保留错误 / 短视频提示
+    var extra = describe();
+    setMessage('已重置为按时长自动：' + (state.count === null ? '待读取时长' : state.count + ' 张') +
+      (extra ? ' · ' + extra : ''), 'ok');
+    render();
+  }
+
   function clearPreview() {
     if (!state.itemId || state.running[state.itemId]) return;
     var id = state.itemId;
@@ -741,6 +780,7 @@
     }
 
     $('generate').addEventListener('click', generate);
+    $('reset').addEventListener('click', resetCount);
     $('clear').addEventListener('click', clearPreview);
 
     // 右键预览图 → 自绘下拉菜单（检查器环境比宿主 contextMenu 更稳、可单测）
