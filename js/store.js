@@ -1,39 +1,29 @@
 /**
- * store.js — 设置与派生缓存读写
+ * store.js — 设置与派生缓存读写 (v1.6.0)
  *
- * 作用域（v0.2.0）：
- *   settings.json                     全局：autoGenerate / expanded
- *   thumbs/<itemId>/config.json       单个视频资源：tileCount（清空预览图不删除）
- *   thumbs/<itemId>/meta.json + jpg   派生缓存：可随时重建 / 清空
+ *   settings.json                            全局：autoGenerate / expanded / pendingPrune
+ *   thumbs/<itemId>/config.json               单个视频：auto / tileCount / activeCount
+ *   thumbs/<itemId>/n<count>/meta.json + jpg  按数量分规格的派生缓存（v1.6.0）
+ *   covers/<itemId>.jpg                      设为封面用的持久副本（不随缓存清理删除）
  *
- * v1.5.0：meta.json 同时是「任务草稿」与「最终结果」：
- *   requested = 用户请求张数（缓存键，不改用户的 config.tileCount）
- *   complete  = 任务是否跑完；false 表示进行中，可续抽
- *   results[i]= true 成功 / false 失败（占位卡片，本来就没有 jpg）/ undefined 待抽
- * 抽帧失败的点是**已定结果**，缓存命中时不再要求它的 jpg 存在。
- * 旧格式（无 requested / complete）按 results 是否填满来兼容，不升 RULE_VERSION。
+ * v1.5.0 的旧缓存是平铺的 `meta.json` + `<index>.jpg`，一律视为 count=9 兼容读取，
+ * **不迁移文件、不升 RULE_VERSION**，升级后旧视频直接命中、零重抽。
  *
- * 全部位于 eagle.app.userDataPath 下；不写 Eagle 资源库、不碰 metadata.json。
+ * config 语义（用户 2026-11-13 拍板「保留旧设置，仅新视频自动」）：
+ *   文件缺失 / auto:true  → 按时长自动决定数量
+ *   旧文件（无 auto）     → auto:false，保留原有 tileCount
+ *   用户手动改数量        → auto:false
+ *   点「清空」            → 重置为 auto:true
+ *
+ * 全部位于 eagle.app.userDataPath 下；除「设为封面」外不写 Eagle 资源库、不碰 metadata.json。
  */
 (function (global) {
   'use strict';
 
   var PLUGIN_DIR = 'eagle-video-preview-grid';
-  // v2：输出规格改为缩图宽度 192（v1 为 320）。规格或采样规则变更时递增，旧缓存自动作废重建。
-  var RULE_VERSION = 'v2';
-  var dataURLCache = Object.create(null);   // C：内存缓存 base64，避免每次 render 重复读盘
-
-  function cacheKey(itemId, index) {
-    return safeId(itemId) + ':' + index;
-  }
-
-  /** 图片被替换 / 清空时，作废该视频的全部 base64 缓存。 */
-  function invalidateThumbs(itemId) {
-    var prefix = safeId(itemId) + ':';
-    Object.keys(dataURLCache).forEach(function (k) {
-      if (k.indexOf(prefix) === 0) delete dataURLCache[k];
-    });
-  }
+  var RULE_VERSION = 'v2';       // 保持：旧缓存零重抽兼容，不升级
+  var LEGACY_COUNT = 9;          // 旧平铺缓存对应的数量
+  var dataURLCache = Object.create(null);
 
   function node() {
     if (typeof require !== 'function') throw new Error('NODE_UNAVAILABLE');
@@ -74,20 +64,26 @@
   }
 
   function getGlobal() {
-    var s = readJson(settingsFile(), {});
+    var s = readJson(settingsFile(), {}) || {};
     return {
-      autoGenerate: s.autoGenerate === true,   // 默认关闭
-      expanded: s.expanded === true            // 默认收起
+      autoGenerate: s.autoGenerate === true,
+      expanded: s.expanded === true,
+      pendingPrune: s.pendingPrune === true
     };
   }
 
+  /** 保留 settings.json 里所有未列出的字段（尤其 pendingPrune），避免被覆盖丢失。 */
   function setGlobal(patch) {
-    var cur = getGlobal();
-    writeJson(settingsFile(), {
-      autoGenerate: typeof patch.autoGenerate === 'boolean' ? patch.autoGenerate : cur.autoGenerate,
-      expanded: typeof patch.expanded === 'boolean' ? patch.expanded : cur.expanded
-    });
+    var cur = readJson(settingsFile(), {}) || {};
+    if (typeof patch.autoGenerate === 'boolean') cur.autoGenerate = patch.autoGenerate;
+    if (typeof patch.expanded === 'boolean') cur.expanded = patch.expanded;
+    if (typeof patch.pendingPrune === 'boolean') cur.pendingPrune = patch.pendingPrune;
+    writeJson(settingsFile(), cur);
   }
+
+  function getPrunePending() { return getGlobal().pendingPrune; }
+  function markPrunePending() { setGlobal({ pendingPrune: true }); }
+  function clearPrunePending() { setGlobal({ pendingPrune: false }); }
 
   /* ---------- 单个视频资源的配置 ---------- */
 
@@ -95,42 +91,129 @@
     return node().path.join(root(), 'thumbs', safeId(itemId));
   }
 
-  function ensureItemDir(itemId) {
-    ensureDir(itemDir(itemId));
-  }
+  function ensureItemDir(itemId) { ensureDir(itemDir(itemId)); }
 
   function configFile(itemId) {
     return node().path.join(itemDir(itemId), 'config.json');
   }
 
+  /**
+   * 文件缺失 = 新视频 = 自动模式；旧文件（无 auto 字段）一律视为手动值保留。
+   * activeCount 是「最近一次实际生效的张数」，供同步清理时判断保留哪套规格
+   * （自动模式下按时长算需要 ffprobe，清理是同步的，所以用这个记录值）。
+   */
   function getItemConfig(itemId) {
-    var c = readJson(configFile(itemId), {});
-    return { tileCount: global.Sampler.clampCount(c.tileCount) };
+    var c = readJson(configFile(itemId), null);
+    if (!c || typeof c !== 'object') return { tileCount: null, auto: true, activeCount: null };
+    var auto = c.auto === true;
+    var active = (typeof c.activeCount === 'number') ? global.Sampler.clampCount(c.activeCount) : null;
+    return {
+      tileCount: auto ? null : global.Sampler.clampCount(c.tileCount),
+      auto: auto,
+      activeCount: active
+    };
   }
 
   function setItemConfig(itemId, cfg) {
-    writeJson(configFile(itemId), {
-      tileCount: global.Sampler.clampCount(cfg.tileCount)
+    var cur = readJson(configFile(itemId), {}) || {};
+    var out = { auto: cfg.auto === true };
+    if (!out.auto) out.tileCount = global.Sampler.clampCount(cfg.tileCount);
+    var active = (cfg.activeCount === undefined) ? cur.activeCount : cfg.activeCount;
+    if (typeof active === 'number') out.activeCount = global.Sampler.clampCount(active);
+    writeJson(configFile(itemId), out);
+  }
+
+  /** 只记录本次生效张数，不改变 auto / tileCount 语义。 */
+  function setActiveCount(itemId, count) {
+    var cur = getItemConfig(itemId);
+    setItemConfig(itemId, {
+      auto: cur.auto,
+      tileCount: cur.tileCount,
+      activeCount: count
     });
   }
 
-  /* ---------- 派生缓存 ---------- */
+  /* ---------- 派生缓存：按数量分规格 ---------- */
 
-  function metaFile(itemId) {
+  function specDir(itemId, count) {
+    return node().path.join(itemDir(itemId), 'n' + count);
+  }
+
+  function ensureSpecDir(itemId, count) { ensureDir(specDir(itemId, count)); }
+
+  function metaFile(itemId, count) {
+    return node().path.join(specDir(itemId, count), 'meta.json');
+  }
+
+  function thumbFile(itemId, count, index) {
+    return node().path.join(specDir(itemId, count), index + '.jpg');
+  }
+
+  /* v1.5.0 旧平铺格式，视为 n9 */
+  function legacyMetaFile(itemId) {
     return node().path.join(itemDir(itemId), 'meta.json');
   }
 
-  function thumbFile(itemId, index) {
+  function legacyThumbFile(itemId, index) {
     return node().path.join(itemDir(itemId), index + '.jpg');
   }
 
-  function readMeta(itemId) {
-    return readJson(metaFile(itemId), null);
+  /** 旧格式没有 requested / complete；用它决定 jpg 走旧平铺路径。 */
+  function isLegacyMeta(meta) {
+    return !!meta && meta.requested === undefined && meta.complete === undefined;
   }
 
-  function writeMeta(itemId, meta) {
-    writeJson(metaFile(itemId), meta);
-    invalidateThumbs(itemId);   // 新生成的图片替换旧缓存
+  function thumbPathFor(meta, itemId, count, index) {
+    return isLegacyMeta(meta)
+      ? legacyThumbFile(itemId, index)
+      : thumbFile(itemId, count, index);
+  }
+
+  function readMeta(itemId, count) {
+    var m = readJson(metaFile(itemId, count), null);
+    if (!m && count === LEGACY_COUNT) m = readJson(legacyMetaFile(itemId), null);
+    return m;
+  }
+
+  /** 草稿与最终结果都写在对应规格目录里，不影响其它规格。 */
+  function writeProgress(itemId, count, meta) {
+    writeJson(metaFile(itemId, count), meta);
+  }
+
+  function writeMeta(itemId, count, meta) {
+    writeJson(metaFile(itemId, count), meta);
+    invalidateThumbs(itemId);
+  }
+
+  function invalidateThumbs(itemId) {
+    var prefix = safeId(itemId) + ':';
+    Object.keys(dataURLCache).forEach(function (k) {
+      if (k.indexOf(prefix) === 0) delete dataURLCache[k];
+    });
+  }
+
+  /**
+   * 从任一规格读时长，避免自动模式下每次切换都跑 ffprobe。
+   * 传入 stat 时只接受与当前源文件一致的 meta（换过源文件则必须重新 probe）。
+   */
+  function readAnyDuration(itemId, stat) {
+    var n = node();
+    var dir = itemDir(itemId);
+    var entries;
+    try { entries = n.fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return null; }
+    var candidates = [legacyMetaFile(itemId)];
+    entries.forEach(function (ent) {
+      if (ent.isDirectory() && /^n\d+$/.test(ent.name)) {
+        candidates.push(n.path.join(dir, ent.name, 'meta.json'));
+      }
+    });
+    for (var i = 0; i < candidates.length; i++) {
+      var m = readJson(candidates[i], null);
+      if (!m || !isFinite(Number(m.duration)) || Number(m.duration) <= 0) continue;
+      if (stat && (m.sourceSize !== stat.size || m.sourceMtime !== stat.mtimeMs)) continue;
+      return Number(m.duration);
+    }
+    return null;
   }
 
   function fileStat(filePath) {
@@ -142,11 +225,7 @@
     }
   }
 
-  /**
-   * 兼容读取 meta。旧格式没有 requested / complete：
-   *   requested 用 count 兜底；complete 用「results 每项都是 true/false」推导。
-   * 所以旧版「9 张里 3 张抽帧失败」的缓存可以直接命中，不需要重抽、也不需要迁移文件。
-   */
+  /** 兼容读取 meta：旧格式用 count 兜底 requested、按 results 是否填满推导 complete。 */
   function normalizeMeta(meta) {
     if (!meta || !Array.isArray(meta.times) || meta.times.length === 0) return null;
     var results = Array.isArray(meta.results) ? meta.results : [];
@@ -161,7 +240,6 @@
     };
   }
 
-  /** 规格键：规则版本 / 请求张数 / 源文件大小与修改时间。 */
   function sameSpec(meta, ctx) {
     var n = normalizeMeta(meta);
     if (!n || meta.rule !== RULE_VERSION) return false;
@@ -170,20 +248,16 @@
     return true;
   }
 
-  /**
-   * 完整命中：任务已跑完（含失败帧），且每张「成功」的 jpg 都存在且非空。
-   * results[i] === false 的帧是已定失败，占位显示，不检查文件 —— 这是 v1.5.0
-   * 修掉「只要有一张失败就永远重抽全部」的关键。
-   */
+  /** 完整命中：已跑完（含已定失败帧），每张成功帧的 jpg 存在且非空。 */
   function isCacheValid(meta, ctx) {
     var n = normalizeMeta(meta);
     if (!n || !n.complete || !sameSpec(meta, ctx)) return false;
     var fs = node().fs;
     for (var i = 0; i < n.meta.times.length; i++) {
-      if (n.results[i] === false) continue;
-      if (n.results[i] !== true) return false;      // 还有 pending，不该命中
+      if (n.results[i] === false) continue;      // 失败帧是占位卡片，本来就没 jpg
+      if (n.results[i] !== true) return false;   // 还有 pending
       try {
-        if (fs.statSync(thumbFile(ctx.itemId, i)).size <= 0) return false;
+        if (fs.statSync(thumbPathFor(meta, ctx.itemId, ctx.count, i)).size <= 0) return false;
       } catch (e) {
         return false;
       }
@@ -191,61 +265,125 @@
     return true;
   }
 
-  /** 规格一致且仍是草稿 → 可续抽：跳过已决帧，只补 pending。 */
   function isResumable(meta, ctx) {
     var n = normalizeMeta(meta);
     return !!n && !n.complete && sameSpec(meta, ctx);
   }
 
-  /** 逐帧落盘用：只写 meta，不清空 base64 缓存（已有的图仍然有效）。 */
-  function writeProgress(itemId, meta) {
-    writeJson(metaFile(itemId), meta);
-  }
-
-  /**
-   * 用 base64 data URL，规避 Windows 中文路径 / 空格 / # 的转义问题。
-   * C：结果缓存在内存里；render() 复用 DOM 后，同一批图不会再重复读盘。
-   */
-  function thumbDataURL(itemId, index) {
-    var k = cacheKey(itemId, index);
+  function thumbDataURL(itemId, count, index) {
+    var k = safeId(itemId) + ':' + count + ':' + index;
     if (dataURLCache[k]) return dataURLCache[k];
-    var buf = node().fs.readFileSync(thumbFile(itemId, index));
+    var fs = node().fs;
+    var p = thumbFile(itemId, count, index);
+    if (!fs.existsSync(p) && count === LEGACY_COUNT) p = legacyThumbFile(itemId, index);
+    var buf = fs.readFileSync(p);
     var url = 'data:image/jpeg;base64,' + buf.toString('base64');
     dataURLCache[k] = url;
     return url;
   }
 
-  /**
-   * 清空某个视频已生成的预览图：删除所有 jpg 与 meta.json，
-   * 但保留 config.json（该视频自己的生成数量）。
-   */
+  /** 「清空」：删除所有规格目录与旧平铺 jpg/meta，但保留 config.json。 */
   function clearItem(itemId) {
     var n = node();
     var fs = n.fs;
     var dir = itemDir(itemId);
     try {
-      fs.readdirSync(dir).forEach(function (f) {
-        if (/^\d+\.jpg$/i.test(f)) {
-          try { fs.unlinkSync(n.path.join(dir, f)); } catch (e) { /* 已不存在 */ }
+      fs.readdirSync(dir, { withFileTypes: true }).forEach(function (ent) {
+        var p = n.path.join(dir, ent.name);
+        if (ent.isDirectory() && /^n\d+$/.test(ent.name)) {
+          try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+        } else if (!ent.isDirectory() && /^(\d+\.jpg|meta\.json)$/i.test(ent.name)) {
+          try { fs.unlinkSync(p); } catch (e) { /* ignore */ }
         }
       });
     } catch (e) { /* 目录不存在 */ }
-    try { fs.unlinkSync(metaFile(itemId)); } catch (e) { /* 已不存在 */ }
     invalidateThumbs(itemId);
+  }
+
+  /**
+   * 清理「用不到的」规格：每个视频只保留 config.activeCount（或 tileCount）对应的
+   * n<count>/ 目录；其余规格目录全部删除。旧平铺文件只在当前规格不是 n9 时删除。
+   * covers/ 不受影响（已设为封面的图必须保留）。
+   * 只在 onPluginCreate 且 pendingPrune 时调用，切换数量的当次会话不清。
+   */
+  function pruneUnused() {
+    var n = node();
+    var fs = n.fs;
+    var base = n.path.join(root(), 'thumbs');
+    var removed = 0;
+    var entries;
+    try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch (e) {
+      return { removed: 0 };
+    }
+    entries.forEach(function (ent) {
+      if (!ent.isDirectory()) return;
+      var dir = n.path.join(base, ent.name);
+      var cfg = readJson(n.path.join(dir, 'config.json'), {}) || {};
+      var keep = null;
+      if (typeof cfg.activeCount === 'number') {
+        keep = 'n' + global.Sampler.clampCount(cfg.activeCount);
+      } else if (cfg.auto !== true && cfg.tileCount != null) {
+        keep = 'n' + global.Sampler.clampCount(cfg.tileCount);
+      }
+      var files;
+      try { files = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+      files.forEach(function (f) {
+        var p = n.path.join(dir, f.name);
+        var isSpec = f.isDirectory() && /^n\d+$/.test(f.name);
+        var isLegacy = !f.isDirectory() && /^(\d+\.jpg|meta\.json)$/i.test(f.name);
+        if (!isSpec && !isLegacy) return;
+        if (isSpec) {
+          if (keep && f.name === keep) return;
+          try { fs.rmSync(p, { recursive: true, force: true }); removed++; } catch (e) { /* ignore */ }
+        } else {
+          if (!keep || keep === 'n' + LEGACY_COUNT) return;
+          try { fs.unlinkSync(p); removed++; } catch (e) { /* ignore */ }
+        }
+      });
+    });
+    return { removed: removed };
+  }
+
+  /* ---------- 设为封面用的持久副本 ---------- */
+
+  function coverFile(itemId) {
+    return node().path.join(root(), 'covers', safeId(itemId) + '.jpg');
+  }
+
+  /** 固定文件名：每个视频只留一份，不随切换封面累积；也不被 pruneUnused 删除。 */
+  function copyToCover(itemId, srcPath) {
+    var n = node();
+    var dst = coverFile(itemId);
+    ensureDir(n.path.dirname(dst));
+    n.fs.copyFileSync(srcPath, dst);
+    return dst;
   }
 
   var api = {
     PLUGIN_DIR: PLUGIN_DIR,
     RULE_VERSION: RULE_VERSION,
+    LEGACY_COUNT: LEGACY_COUNT,
     root: root,
     getGlobal: getGlobal,
     setGlobal: setGlobal,
+    getPrunePending: getPrunePending,
+    markPrunePending: markPrunePending,
+    clearPrunePending: clearPrunePending,
+    itemDir: itemDir,
     ensureItemDir: ensureItemDir,
+    ensureSpecDir: ensureSpecDir,
+    specDir: specDir,
     getItemConfig: getItemConfig,
     setItemConfig: setItemConfig,
+    setActiveCount: setActiveCount,
     metaFile: metaFile,
     thumbFile: thumbFile,
+    legacyMetaFile: legacyMetaFile,
+    legacyThumbFile: legacyThumbFile,
+    isLegacyMeta: isLegacyMeta,
+    thumbPathFor: thumbPathFor,
     readMeta: readMeta,
+    readAnyDuration: readAnyDuration,
     writeMeta: writeMeta,
     writeProgress: writeProgress,
     fileStat: fileStat,
@@ -255,7 +393,10 @@
     isCacheValid: isCacheValid,
     thumbDataURL: thumbDataURL,
     invalidateThumbs: invalidateThumbs,
-    clearItem: clearItem
+    clearItem: clearItem,
+    pruneUnused: pruneUnused,
+    coverFile: coverFile,
+    copyToCover: copyToCover
   };
 
   global.Store = api;

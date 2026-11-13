@@ -3,6 +3,41 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本。
 
+## [1.6.0] - 2026-11-13
+
+### 新增 · 按时长自动决定张数
+
+- `Sampler.autoCount(duration)`：10 档分桶，每档 +3 张。边界 `30s / 1 / 2 / 5 / 10 / 20 / 40 / 60 / 120min`（凑整、非线性递增），`<30s` 为 3 张、`≥7200s` 为 30 张。
+- `<30s 默认 3 张及以下`由既有 5 秒最低间隔自动保证（10s 出 2 张、5s 出 1 张）。
+- **config.json 增加 `auto` 字段**（用户拍板「保留旧设置，仅新视频自动」）：文件缺失或 `auto:true` → 按时长算；旧文件（无 `auto`）一律视为手动值原样保留；用户手动改数量 → `auto:false`；点「清空」 → 重置为 `auto:true`。设 0 张仍是显式手动设置。
+- `generate()` 先取时长再决定数量；优先从任一规格的 meta 读时长并校验源文件未变，避免每次切换都跑 `ffprobe`。自动模式且无缓存时输入框显示「自动」，生成后填入实际值；状态行带「自动」标记。
+
+### 新增 · 右键预览图设为封面
+
+- 网格内 `contextmenu` 事件 + 自绘 DOM 下拉菜单「设为封面」（不依赖宿主 `eagle.contextMenu.open`，检查器环境更稳）。
+- 只对成功生成的帧可用；点击后先把缩图复制到 `covers/<itemId>.jpg`（固定文件名、不累积、不被缓存清理删除），再调用官方 `item.setCustomThumbnail(path)`。
+- **这是插件首次写入 Eagle 资源库**：会修改该素材的封面，已在 README / 商店文案 / 审核说明中披露。
+
+### 新增 · 多规格缓存与延迟清理
+
+- 缓存由单一 `meta.json` 改为按数量分目录 `thumbs/<itemId>/n<count>/meta.json + <index>.jpg`。切换数量时旧规格原样保留，切回去直接命中、不重抽。
+- **旧缓存零重抽兼容**：v1.5.0 及以前的平铺 `meta.json` / `<index>.jpg` 视为 `count=9` 读取（旧格式无 `requested`/`complete` 即 legacy，jpg 走旧路径）。**`RULE_VERSION` 保持 `v2` 不升级**，不迁移文件、不触发全量重绘。
+- 清理时机（用户拍板「下次启动插件时清理」）：改数量产生新规格时只写 `settings.json` 的 `pendingPrune` 标记、不删任何文件；`onPluginCreate` 时同步执行 `Store.pruneUnused()`，按每个视频 `config.activeCount` 保留当前规格、删除其它规格目录，然后清除标记。`covers/` 不受影响。
+- **官方边界（负向结论）**：[event 文档](https://developer.eagle.cool/plugin-api/zh-cn/api/event) 只有 7 个回调，`onPluginBeforeExit` 说的是「插件窗口关闭前」，**没有主程序退出事件**；检查器插件无 `main` 窗口，该事件是否触发官方未说明。因此严格意义的「关闭软件时清空」无法保证，改为下次启动时清理，效果等价且可靠。
+
+### 验证
+
+- `test/sampler.test.js` 扩到 **15 组**（分桶边界、每档 +3、边界凑整、无效时长兜底、<30s 实际 ≤3 张）。
+- `test/cache.test.js` 扩到 **11 组**（旧平铺缓存零重抽兼容、多规格隔离、`config.auto` 语义、`pruneUnused`、`pendingPrune` 不丢字段、`readAnyDuration`）。
+- `npm test` **42/42** 通过（采样 15 + 布局 9 + 抽帧 7 + 缓存 11）。`RULE_VERSION` 仍为 `v2`；`onPluginCreate` 内的全局设置读取、事件驱动高度逻辑、`multiSelect:false`、无新增定时器均未改动。
+
+### 待实测
+
+1. 升级后已有视频是否仍保持原张数、直接出图（旧缓存兼容）。
+2. 右键「设为封面」是否生效，以及 Eagle 是否会把传入图片复制进资源库（官方未说明；实现已用 `covers/` 副本兜底）。
+3. 自动模式下切换到无缓存视频的 `ffprobe` 延迟是否可接受。
+4. 切换数量来回对比是否真的不重抽；下次启动后废弃规格是否被正确清理。
+
 ## [1.5.0] - 2026-11-12
 
 ### 修复 · 部分抽帧失败导致每次全量重抽、切换中断从头开始

@@ -21,10 +21,38 @@
   'use strict';
 
   var MIN_GAP = 5;           // 最低时间间隔，秒
-  var DEFAULT_COUNT = 9;     // 自动生成数量默认值
+  var DEFAULT_COUNT = 9;     // 兜底数量（拿不到时长 / 非法输入时）
   var MIN_COUNT = 0;         // 0 = 该视频不生成预览图
   var MAX_COUNT = 30;        // 输入上限，防止误填导致大量 spawn
   var MIN_FIRST_POINT = 1;   // 首点保护阈值：早于 1s 视为片头黑帧
+
+  /**
+   * 时长自动分桶（v1.6.0）。每档 +3 张，边界全部凑整、非线性递增：
+   *   30s / 1 / 2 / 5 / 10 / 20 / 40 / 60 / 120 分钟
+   * 下界含、上界不含；最后一档 >= 7200s 为 30 张。
+   */
+  var AUTO_BUCKETS = [
+    { max: 30,      count: 3 },
+    { max: 60,      count: 6 },
+    { max: 120,     count: 9 },
+    { max: 300,     count: 12 },
+    { max: 600,     count: 15 },
+    { max: 1200,    count: 18 },
+    { max: 2400,    count: 21 },
+    { max: 3600,    count: 24 },
+    { max: 7200,    count: 27 },
+    { max: Infinity, count: 30 }
+  ];
+
+  /** 按视频时长返回默认张数；时长无效时回退 DEFAULT_COUNT。 */
+  function autoCount(duration) {
+    var T = Number(duration);
+    if (!isFinite(T) || T <= 0) return DEFAULT_COUNT;
+    for (var i = 0; i < AUTO_BUCKETS.length; i++) {
+      if (T < AUTO_BUCKETS[i].max) return AUTO_BUCKETS[i].count;
+    }
+    return MAX_COUNT;
+  }
 
   /**
    * 合法范围 0–30；空值 / 非数字 / 负数回退默认 9，小数向下取整。
@@ -125,6 +153,8 @@
     MIN_COUNT: MIN_COUNT,
     MAX_COUNT: MAX_COUNT,
     MIN_FIRST_POINT: MIN_FIRST_POINT,
+    AUTO_BUCKETS: AUTO_BUCKETS,
+    autoCount: autoCount,
     clampCount: clampCount,
     plan: plan,
     formatTime: formatTime

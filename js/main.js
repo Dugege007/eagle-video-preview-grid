@@ -1,33 +1,17 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.5.0)
+ * main.js — 检查器区块 UI 与生命周期 (v1.6.0)
  *
- * v1.5.0：抽帧结果「逐帧落盘、可续抽、部分失败也算完成」：
- *   - meta.json 既是草稿也是最终结果（requested / complete / results）
- *   - 抽帧失败的点保留为占位卡片（提示视频该节点可能损坏），作为已定结果缓存
- *   - 切换选中不中断任务；任务按 itemId 去重，完成回调只在选中项匹配时更新 UI
- *   - 旧缓存（无 requested / complete）就地兼容，不升 RULE_VERSION、不重抽
+ * v1.6.0：
+ *   - 数量不再固定默认 9：未手动设置过的视频按 Sampler.autoCount(时长) 自动分桶；
+ *     手动改数量 → auto=false 按视频记住；点「清空」→ 重置为 auto=true
+ *   - 缓存按数量分规格 n<count>/，切换数量时旧规格保留、直接命中不重抽
+ *   - 右键预览图 → 自绘菜单「设为封面」→ item.setCustomThumbnail()
+ *   - 改数量只置 pendingPrune 标记；onPluginCreate 时清理用不到的规格
+ * v1.5.0：逐帧落盘 / 可续抽 / 部分失败也算完成（占位卡片）
+ * v1.4.0：单选稳态；全局设置必须在 onPluginCreate 内读取（v1.3.1 回归教训）
  *
- * v1.4.0：回退多选批量功能（v1.3.0/v1.3.1），恢复单选稳态；只保留
- *   「首帧隐藏」这一无副作用改动，全局设置仍在 onPluginCreate 里读。
- *
- * 全局状态（settings.json）：自动生成开关、展开/折叠 —— 切换视频保持。
- *   必须在 onPluginCreate 内读取（Eagle 保证 API 就绪），提前到脚本解析
- *   阶段会因 eagle.app.userDataPath 未就绪而静默回退成默认 false/false。
- * 单项状态（thumbs/<itemId>/config.json）：生成数量 —— 各视频互相独立
- *   数量 0 表示该视频不生成预览图：清掉已有缩图、不调用 FFmpeg、网格高度 0。
- *   改回 1–30 立即恢复，不需要重新选择视频。
- * 内存状态：清空后的「抑制自动生成」标记，重新选择该视频时解除
- *
- * 高度策略（v0.3.1 修复）：
- *   - 只由「操作事件」触发，一个事件只同步刷新一次；没有任何定时器 / 间隔刷新。
- *   - 可用高度用插件加载时记录的固定基准 baseViewport，绝不读取会随自身写入
- *     而变化的 window.innerHeight —— 这是 v0.3.0 高度逐次递减的根因。
- *   - 不再尝试改宿主 iframe 高度（实测无效，且是反馈循环的另一半）。
- *   - refreshLayout() 幂等：值没变就一个字都不写。
- *
- * 1s 轮询只用于检测「选中项变化」（官方 7 个 event 里没有该事件），不触碰高度。
- *
- * 明确不做：点击跳转播放、快捷键、自定义取帧、可编辑描述、hover 播放。
+ * 高度策略：只由操作事件触发，一个事件一次同步刷新；无任何定时器 / 间隔刷新。
+ * 1s 轮询只用于检测选中项变化，不触碰高度。
  */
 (function () {
   'use strict';
@@ -37,20 +21,23 @@
   var Store = window.Store;
   var Capture = window.Capture;
 
-  var DEFAULT_VIEWPORT = 320;   // manifest 的 inspector.height，作为拿不到视口时的兜底
-  var SAFE_MARGIN = 4;          // 防裁切的固定余量
+  var DEFAULT_VIEWPORT = 320;
+  var SAFE_MARGIN = 4;
 
   var state = {
     itemId: null,
+    count: null,                // 当前生效张数；auto 且时长未知时为 null
+    autoMode: false,
     running: {},                // itemId -> true：按视频去重，切换选中不中断后台任务
     meta: null,
     message: '',
     kind: 'hint',
     global: { autoGenerate: false, expanded: false },
-    suppressed: {},                 // itemId -> true
+    suppressed: {},
     lastCount: S.DEFAULT_COUNT,
-    baseViewport: DEFAULT_VIEWPORT, // 只取一次，之后永不更新
-    lastWidth: 0                    // 最近一次已知的 iframe 宽度
+    baseViewport: DEFAULT_VIEWPORT,
+    lastWidth: 0,
+    menuIndex: null
   };
 
   function $(id) { return document.getElementById(id); }
@@ -62,31 +49,18 @@
 
   function friendlyError(e) {
     var code = (e && e.message) ? e.message : String(e);
-    if (code.indexOf('NODE_UNAVAILABLE') >= 0) {
-      return '当前检查器环境无法调用 Node 模块，FFmpeg 不可用。';
-    }
+    if (code.indexOf('NODE_UNAVAILABLE') >= 0) return '当前检查器环境无法调用 Node 模块，FFmpeg 不可用。';
     if (code.indexOf('FFMPEG_NOT_INSTALLED') >= 0 || code.indexOf('FFMPEG_MODULE_MISSING') >= 0) {
       return '请先在 Eagle 插件设置中安装官方「FFmpeg 依赖插件」。';
     }
-    if (code.indexOf('FFMPEG_PATHS_MISSING') >= 0) {
-      return 'FFmpeg 依赖插件未返回 ffprobe 路径，无法读取视频时长。';
-    }
-    if (code.indexOf('DURATION') >= 0) {
-      return '无法读取该视频时长，FFmpeg 可能不支持此文件。';
-    }
-    if (code.indexOf('NO_SELECTED_ITEM') >= 0) {
-      return '请先选中一个视频文件。';
-    }
-    if (code.indexOf('TIMEOUT') >= 0) {
-      return 'FFmpeg 抽帧超时，请检查文件是否损坏。';
-    }
-    if (code.indexOf('EACCES') >= 0 || code.indexOf('EPERM') >= 0) {
-      return '写入缓存被拒绝，请检查 Eagle 用户数据目录权限。';
-    }
+    if (code.indexOf('FFMPEG_PATHS_MISSING') >= 0) return 'FFmpeg 依赖插件未返回 ffprobe 路径，无法读取视频时长。';
+    if (code.indexOf('DURATION') >= 0) return '无法读取该视频时长，FFmpeg 可能不支持此文件。';
+    if (code.indexOf('NO_SELECTED_ITEM') >= 0) return '请先选中一个视频文件。';
+    if (code.indexOf('TIMEOUT') >= 0) return 'FFmpeg 抽帧超时，请检查文件是否损坏。';
+    if (code.indexOf('EACCES') >= 0 || code.indexOf('EPERM') >= 0) return '写入缓存被拒绝，请检查 Eagle 用户数据目录权限。';
     return '操作失败：' + code.slice(0, 160);
   }
 
-  /** 控件是否禁用只看「当前显示的这个视频」有没有任务在跑。 */
   function syncBusy() {
     var busy = !!(state.itemId && state.running[state.itemId]);
     $('generate').disabled = busy;
@@ -98,23 +72,26 @@
 
   function isMine(itemId) { return state.itemId === itemId; }
 
-  /** 缓存规格键：请求张数 + 源文件大小 / 修改时间（规则版本由 Store 内部比）。 */
-  function specOf(item, count) {
-    var stat = Store.fileStat(item.filePath);
-    return {
-      itemId: item.id,
-      count: count,
-      sourceSize: stat.size,
-      sourceMtime: stat.mtimeMs
-    };
+  function specOf(item, count, stat) {
+    var s = stat || Store.fileStat(item.filePath);
+    return { itemId: item.id, count: count, sourceSize: s.size, sourceMtime: s.mtimeMs };
   }
 
   function syncControls() {
     $('autoGenerate').checked = state.global.autoGenerate;
-    // 自动生成开启时：手动「生成」与「清空」都隐藏
     $('generate').hidden = state.global.autoGenerate;
     $('clear').hidden = state.global.autoGenerate;
-    $('tileCount').value = state.lastCount;
+    var input = $('tileCount');
+    if (state.count === null) {
+      input.value = '';
+      input.placeholder = '自动';
+    } else {
+      input.value = state.count;
+      input.placeholder = '';
+    }
+    input.title = state.autoMode
+      ? ('按时长自动：' + (state.count === null ? '待读取时长' : state.count + ' 张') + '；手动输入可覆盖')
+      : '0 = 此视频不生成预览图';
   }
 
   function describe() {
@@ -123,27 +100,21 @@
     var total = meta.times.length;
     var visible = L.visibleCount(total, state.global.expanded);
     var parts = [];
-    parts.push(total > L.VISIBLE_LIMIT
-      ? '显示 ' + visible + ' / 共 ' + total + ' 张'
-      : '共 ' + total + ' 张');
+    parts.push(total > L.VISIBLE_LIMIT ? '显示 ' + visible + ' / 共 ' + total + ' 张' : '共 ' + total + ' 张');
     parts.push('时长 ' + S.formatTime(meta.duration));
     parts.push('间隔 ' + Number(meta.gap).toFixed(1) + 's');
+    if (state.autoMode) parts.push('自动');
     if (meta.truncated) parts.push('受最低间隔限制');
     if (meta.droppedFirst) parts.push('已跳过片头');
     var results = Array.isArray(meta.results) ? meta.results : [];
     var done = results.filter(function (r) { return r === true || r === false; }).length;
     var failed = results.filter(function (r) { return r === false; }).length;
-    // 失败帧仍是 9 张里的一张（占位卡片），所以 total 不变、只补一句提示
     if (failed > 0) parts.push(failed + ' 张抽帧失败');
     if (meta.complete === false) parts.push('已完成 ' + done + ' / ' + total);
     return parts.join(' · ');
   }
 
-  /**
-   * 纯同步、幂等的高度刷新。只由事件调用，一个事件一次。
-   * 可用高度基于固定基准 baseViewport，不读取动态 window.innerHeight，
-   * 因此重复调用永远得到同一个结果，不会逐次递减。
-   */
+  /** 纯同步、幂等的高度刷新。只由事件调用，一个事件一次。 */
   function refreshLayout() {
     var grid = $('grid');
     var cells = grid.querySelectorAll('.cell');
@@ -152,38 +123,27 @@
     var overflow;
     var margin;
 
-    // 插件 iframe 刚创建时 Eagle 可能还没给它分配最终高度，
-    // 首个视频的首次测量会偏小。只在基准明显不可信时重取一次，之后仍固定不变
-    // （不引入定时器；这正是 v0.3.1 修掉反馈循环的关键约束）。
     if (state.baseViewport < 200) {
       state.baseViewport = window.innerHeight || DEFAULT_VIEWPORT;
     }
 
     if (n === 0) {
-      px = '0px';
-      overflow = 'hidden';
-      margin = '0px';
+      px = '0px'; overflow = 'hidden'; margin = '0px';
     } else {
       var cellH = cells[0].getBoundingClientRect().height;
       var gap = parseFloat(window.getComputedStyle(grid).rowGap) || 8;
       var target = L.heightFor(n, cellH, gap, state.global.expanded);
-
-      // 除网格外的固定开销（工具栏 / 状态行 / footer / padding）
       var wrapH = $('wrap').getBoundingClientRect().height;
       var gridH = grid.getBoundingClientRect().height;
       var chrome = Math.max(0, wrapH - gridH);
       var avail = Math.max(0, state.baseViewport - chrome - SAFE_MARGIN);
       var fit = L.fitHeight(target, avail);
-
       px = fit.height + 'px';
       overflow = fit.scroll ? 'auto' : 'hidden';
       margin = '6px';
     }
 
-    // 幂等短路：值没变就不写 DOM，杜绝任何写入 -> resize -> 再写入的反馈循环
-    if (grid.style.height === px &&
-        grid.style.overflowY === overflow &&
-        grid.style.marginTop === margin) return;
+    if (grid.style.height === px && grid.style.overflowY === overflow && grid.style.marginTop === margin) return;
     grid.style.height = px;
     grid.style.overflowY = overflow;
     grid.style.marginTop = margin;
@@ -200,14 +160,14 @@
     var visible = L.visibleCount(total, state.global.expanded);
     var showToggle = L.needsToggle(total);
 
-    // C：渲染签名只在「内容」变化时改变。状态文本更新 / 高度刷新不重建卡片、
-    // 不重复读盘取 base64（store.js 也有一层内存缓存）。
+    // 渲染签名含 count：同一视频切换数量规格时必须重建卡片
     var sig = [
       state.itemId || '',
+      state.count === null ? 'AUTO' : state.count,
       meta ? (meta.generatedAt || 0) : 0,
       visible,
       meta && meta.results ? meta.results.map(function (r) {
-        return r === true ? '1' : (r === false ? '0' : '-');   // 待抽帧也要进签名
+        return r === true ? '1' : (r === false ? '0' : '-');
       }).join('') : ''
     ].join('|');
 
@@ -216,16 +176,15 @@
       for (var i = 0; i < visible; i++) {
         var cell = document.createElement('div');
         cell.className = 'cell';
+        cell.setAttribute('data-index', String(i));
 
         var frameStatus = meta.results ? meta.results[i] : undefined;
         if (frameStatus === false) {
-          // 已定失败：占位卡片也算一张图，提示视频该时间点可能损坏
           var ph = document.createElement('div');
           ph.className = 'thumb placeholder';
           ph.textContent = '抽帧失败';
           cell.appendChild(ph);
         } else if (frameStatus === undefined) {
-          // 草稿里还没抽到的帧：与「抽帧失败」区分开
           var pending = document.createElement('div');
           pending.className = 'thumb placeholder pending';
           pending.textContent = '待抽帧';
@@ -234,18 +193,10 @@
           var img = document.createElement('img');
           img.className = 'thumb';
           img.alt = '';
-          img.title = S.formatTime(meta.times[i]);
-          // 首次生成时图片尚未解码完成，cellH 可能量到未布局的值。
-          // 最后一张图 load 后再同步校准一次高度：纯事件、一次；
-          // refreshLayout() 有幂等短路，值相同就不会写 DOM。
-          if (i === visible - 1) {
-            img.addEventListener('load', refreshLayout, { once: true });
-          }
-          try {
-            img.src = Store.thumbDataURL(state.itemId, i);
-          } catch (e) {
-            img.classList.add('placeholder');
-          }
+          img.title = S.formatTime(meta.times[i]) + '（右键设为封面）';
+          if (i === visible - 1) img.addEventListener('load', refreshLayout, { once: true });
+          try { img.src = Store.thumbDataURL(state.itemId, state.count, i); }
+          catch (e) { img.classList.add('placeholder'); }
           cell.appendChild(img);
         }
 
@@ -253,7 +204,6 @@
         time.className = 'time';
         time.textContent = S.formatTime(meta.times[i]);
         cell.appendChild(time);
-
         grid.appendChild(cell);
       }
       grid.setAttribute('data-sig', sig);
@@ -261,17 +211,13 @@
 
     $('footer').hidden = !showToggle;
     $('toggle').textContent = state.global.expanded ? '收起 ▴' : '展开 ▾';
-    refreshLayout();         // 本次事件的一次刷新（内部幂等短路）
+    refreshLayout();
   }
 
-  /**
-   * 抽帧过程中逐张替换「待抽帧」占位：只改这一格，不整块 render、不刷新高度。
-   * 占位与图片同为 16:9 尺寸，替换不会改变行高。
-   */
-  function replacePendingCell(itemId, index, ok, times) {
-    var grid = $('grid');
-    var cell = grid.children[index];
-    if (!cell) return;                       // 收起态只渲染前 9 张，超出的没有 cell
+  /** 逐张替换「待抽帧」占位：只改这一格，不整块 render、不刷新高度。 */
+  function replacePendingCell(itemId, count, index, ok, times) {
+    var cell = $('grid').children[index];
+    if (!cell) return;
     var old = cell.querySelector('.thumb.pending');
     if (!old) return;
     var repl;
@@ -279,10 +225,9 @@
       repl = document.createElement('img');
       repl.className = 'thumb';
       repl.alt = '';
-      repl.title = S.formatTime(times[index]);
-      try {
-        repl.src = Store.thumbDataURL(itemId, index);
-      } catch (e) {
+      repl.title = S.formatTime(times[index]) + '（右键设为封面）';
+      try { repl.src = Store.thumbDataURL(itemId, count, index); }
+      catch (e) {
         repl = document.createElement('div');
         repl.className = 'thumb placeholder';
         repl.textContent = '读取失败';
@@ -300,6 +245,62 @@
     return items && items[0];
   }
 
+  /* ---------- 右键菜单 → 设为封面 ---------- */
+
+  function hideCellMenu() {
+    var m = $('cellMenu');
+    if (m) m.hidden = true;
+    state.menuIndex = null;
+  }
+
+  function showCellMenu(x, y, index) {
+    var m = $('cellMenu');
+    if (!m) return;
+    m.style.left = Math.max(0, Math.min(x, window.innerWidth - 140)) + 'px';
+    m.style.top = Math.max(0, Math.min(y, window.innerHeight - 48)) + 'px';
+    m.hidden = false;
+    state.menuIndex = index;
+  }
+
+  async function setCover(index) {
+    hideCellMenu();
+    var meta = state.meta;
+    if (!state.itemId || !meta || state.count === null) return;
+    if (!meta.results || meta.results[index] !== true) {
+      setMessage('该帧未成功生成，无法设为封面', 'warn');
+      render();
+      return;
+    }
+    try {
+      var item = await selectedItem();
+      if (!item || item.id !== state.itemId) {
+        setMessage('请先选中该视频再设为封面', 'warn');
+        render();
+        return;
+      }
+      if (typeof item.setCustomThumbnail !== 'function') {
+        throw new Error('当前 Eagle 版本不支持设置自定义封面');
+      }
+      var src = Store.thumbPathFor(meta, state.itemId, state.count, index);
+      // 先复制到持久 covers/，避免缓存清理影响已设置的封面
+      var cover = Store.copyToCover(state.itemId, src);
+      await item.setCustomThumbnail(cover);
+      setMessage('已将 ' + S.formatTime(meta.times[index]) + ' 设为封面', 'ok');
+    } catch (e) {
+      setMessage('设为封面失败：' + String((e && e.message) || e).slice(0, 120), 'error');
+    }
+    render();
+  }
+
+  /* ---------- 数量决策 ---------- */
+
+  /** 优先从已有规格 meta 读时长（且校验源文件未变），否则才跑 ffprobe。 */
+  async function durationOf(item, paths, stat) {
+    var cached = Store.readAnyDuration(item.id, stat);
+    if (cached) return cached;
+    return await Capture.probeDuration(paths.ffprobe, item.filePath);
+  }
+
   async function generate() {
     if (!state.itemId) {
       setMessage('请先选中一个视频文件', 'warn');
@@ -307,45 +308,47 @@
       return;
     }
 
-    var count = S.clampCount($('tileCount').value);
-    $('tileCount').value = count;
-    state.lastCount = count;
-
-    // 0 张：该视频不生成预览图。连时长都不读，也不触发任何 FFmpeg 进程。
-    if (count === S.MIN_COUNT) {
-      disableForItem();
-      return;
-    }
-
-    try { Store.setItemConfig(state.itemId, { tileCount: count }); } catch (e) { /* 不阻塞 */ }
-
-    // 一次选中项快照：整个任务都用这个 item，切换选中不会改变任务归属
+    // 一次选中项快照：整个任务都用这个 item，切换选中不改变任务归属
     var item;
-    try {
-      item = await selectedItem();
-    } catch (e) {
-      setMessage(friendlyError(e), 'error');
-      render();
-      return;
-    }
-    if (!item) {
-      setMessage('请先选中一个视频文件', 'warn');
-      render();
-      return;
-    }
+    try { item = await selectedItem(); }
+    catch (e) { setMessage(friendlyError(e), 'error'); render(); return; }
+    if (!item || item.id !== state.itemId) return;
 
     var taskId = item.id;
-    if (state.running[taskId]) return;          // 同一视频已有任务在跑，不重复抽
-    var spec = specOf(item, count);
-    var disk = Store.readMeta(taskId);
+    if (state.running[taskId]) return;
+
+    var paths;
+    try { paths = await Capture.ensureFFmpeg(); }
+    catch (e) { setMessage(friendlyError(e), 'error'); render(); return; }
+
+    var stat = Store.fileStat(item.filePath);
+    var cfg;
+    try { cfg = Store.getItemConfig(taskId); }
+    catch (e) { cfg = { tileCount: null, auto: true, activeCount: null }; }
+
+    // 手动设 0：不读时长、不抽帧（0 张是用户的显式设置，不能被自动模式覆盖）
+    if (!cfg.auto && cfg.tileCount === S.MIN_COUNT) {
+      disableForItem(taskId);
+      return;
+    }
+
+    var duration;
+    try { duration = await durationOf(item, paths, stat); }
+    catch (e) { setMessage(friendlyError(e), 'error'); render(); return; }
+
+    var count = S.clampCount(cfg.auto ? S.autoCount(duration) : cfg.tileCount);
+    state.count = count;
+    state.autoMode = cfg.auto;
+    state.lastCount = count;
+    syncControls();
+    try { Store.setActiveCount(taskId, count); } catch (e) { /* 不阻塞 */ }
+
+    var spec = specOf(item, count, stat);
+    var disk = Store.readMeta(taskId, count);
 
     // 完整结果（含已定失败帧）→ 直接复用，不重抽
     if (Store.isCacheValid(disk, spec)) {
-      if (isMine(taskId)) {
-        state.meta = disk;
-        setMessage(describe(), 'hint');
-        render();
-      }
+      if (isMine(taskId)) { state.meta = disk; setMessage(describe(), 'hint'); render(); }
       return;
     }
 
@@ -353,78 +356,66 @@
     syncBusy();
 
     try {
-      var paths = await Capture.ensureFFmpeg();
-      var times, results, duration, gap, truncated, droppedFirst;
-
-      if (Store.isResumable(disk, spec)) {
-        // 续抽：复用时间点与已决结果，只补 pending，不从头开始
+      var times, results, gap, truncated, droppedFirst;
+      var resuming = Store.isResumable(disk, spec);
+      if (resuming) {
         times = disk.times.slice();
         results = disk.results.slice();
-        duration = disk.duration;
         gap = disk.gap;
         truncated = !!disk.truncated;
         droppedFirst = !!disk.droppedFirst;
       } else {
-        duration = await Capture.probeDuration(paths.ffprobe, item.filePath);
         var p = S.plan(duration, count);
         if (p.reason === 'too-short' || p.times.length === 0) {
           if (isMine(taskId)) {
-            setMessage(
-              '视频不足 ' + S.MIN_GAP + ' 秒（时长 ' + S.formatTime(duration) + '），无法生成预览图',
-              'warn'
-            );
+            setMessage('视频不足 ' + S.MIN_GAP + ' 秒（时长 ' + S.formatTime(duration) + '），无法生成预览图', 'warn');
             render();
           }
           return;
         }
-        times = p.times;
-        gap = p.gap;
-        results = new Array(times.length);
-        truncated = p.truncated;
-        droppedFirst = p.droppedFirst;
+        times = p.times; gap = p.gap; results = new Array(times.length);
+        truncated = p.truncated; droppedFirst = p.droppedFirst;
       }
 
-      Store.ensureItemDir(taskId);
+      Store.ensureSpecDir(taskId, count);
       var meta = {
         rule: Store.RULE_VERSION,
-        requested: count,          // 缓存键：用户请求数，不随成功/失败改变
-        count: count,              // 兼容字段
+        requested: count,
+        count: count,
         duration: duration,
         gap: gap,
-        times: times,             // 始终保留全部时间点，失败项显示占位卡片
-        results: results,         // true 成功 / false 失败 / undefined 待抽
-        complete: false,          // 草稿；跑完才置 true
+        times: times,
+        results: results,
+        complete: false,
         truncated: truncated,
         droppedFirst: droppedFirst,
-        sourceSize: spec.sourceSize,
-        sourceMtime: spec.sourceMtime,
+        sourceSize: stat.size,
+        sourceMtime: stat.mtimeMs,
         generatedAt: Date.now()
       };
-      Store.writeProgress(taskId, meta);   // 先落草稿：切走 / 进程被杀也能恢复
+      Store.writeProgress(taskId, count, meta);
+      // 新建规格才标记清理；续抽同一规格不标记（避免把正在对比的旧规格提前删掉）
+      if (!resuming) { try { Store.markPrunePending(); } catch (e) { /* ignore */ } }
 
       var skip = results.map(function (r) { return r === true || r === false; });
-      if (isMine(taskId)) {
-        state.meta = meta;                 // 立即显示已完成的帧
-        setMessage(describe(), 'hint');
-        render();
-      }
+      if (isMine(taskId)) { state.meta = meta; setMessage(describe(), 'hint'); render(); }
 
       await Capture.captureAll(
         paths.ffmpeg, item.filePath, times,
-        times.map(function (_, i) { return Store.thumbFile(taskId, i); }),
-        function (done, total) {
+        times.map(function (_, i) { return Store.thumbFile(taskId, count, i); }),
+        function (done, totalDone) {
           if (!isMine(taskId)) return;
-          setMessage('正在抽帧 ' + done + ' / ' + total + ' …', 'hint');
+          setMessage('正在抽帧 ' + done + ' / ' + totalDone + ' …', 'hint');
           $('status').textContent = state.message;   // 只更新文本，不刷新高度
         },
         {
-          skip: skip,                    // 成功或已定失败都不重抽
+          skip: skip,
           onFrame: function (i, ok) {
             results[i] = ok;
             meta.results = results.slice();
             meta.generatedAt = Date.now();
-            try { Store.writeProgress(taskId, meta); } catch (e) { /* 落盘失败不中断抽帧 */ }
-            if (isMine(taskId)) replacePendingCell(taskId, i, ok, times);
+            try { Store.writeProgress(taskId, count, meta); } catch (e) { /* 落盘失败不中断抽帧 */ }
+            if (isMine(taskId)) replacePendingCell(taskId, count, i, ok, times);
           }
         }
       );
@@ -433,7 +424,7 @@
       meta.results = results.slice();
       meta.failed = results.filter(function (x) { return x === false; }).length;
       meta.generatedAt = Date.now();
-      Store.writeMeta(taskId, meta);     // 最终结果：可作废 base64 缓存
+      Store.writeMeta(taskId, count, meta);
 
       if (isMine(taskId)) {
         state.meta = meta;
@@ -441,10 +432,7 @@
         render();
       }
     } catch (e) {
-      if (isMine(taskId)) {
-        setMessage(friendlyError(e), 'error');
-        render();
-      }
+      if (isMine(taskId)) { setMessage(friendlyError(e), 'error'); render(); }
     } finally {
       delete state.running[taskId];
       syncBusy();
@@ -453,42 +441,46 @@
 
   function clearPreview() {
     if (!state.itemId || state.running[state.itemId]) return;
+    var id = state.itemId;
     try {
-      Store.clearItem(state.itemId);
+      Store.clearItem(id);                                     // 删所有规格的 jpg / meta
+      Store.setItemConfig(id, { auto: true, activeCount: null }); // 清空 = 恢复按时长自动
     } catch (e) {
       setMessage(friendlyError(e), 'error');
       render();
       return;
     }
-    state.suppressed[state.itemId] = true;
+    state.suppressed[id] = true;
     state.meta = null;
+    state.count = null;
+    state.autoMode = true;
+    syncControls();
     setMessage(
-      state.global.autoGenerate ? '已清空，重新选择该视频后会再次生成' : '已清空',
+      state.global.autoGenerate ? '已清空，重新选择该视频后会按时长自动生成' : '已清空，下次生成将按时长自动决定张数',
       'hint'
     );
     render();
   }
 
-  /**
-   * 数量设为 0：该视频不生成预览图。
-   * 删除已生成的缩图缓存，config.json 写入 0（按视频各自保存），网格高度归 0。
-   * 不调用 ffprobe / ffmpeg，也不写 suppressed —— 数量改回 1–30 可立即恢复生成。
-   */
-  function disableForItem() {
-    var id = state.itemId;
+  /** 数量设为 0：保持为显式手动设置，恢复需手动改回 1–30。 */
+  function disableForItem(itemId) {
+    var id = itemId || state.itemId;
+    if (!id) return;
     try {
-      Store.clearItem(id);                       // 删 jpg + meta.json，保留 config.json
-      Store.setItemConfig(id, { tileCount: 0 });
+      Store.clearItem(id);
+      Store.setItemConfig(id, { auto: false, tileCount: 0 });
     } catch (e) {
       setMessage(friendlyError(e), 'error');
       render();
       return;
     }
+    state.count = 0;
+    state.autoMode = false;
     state.lastCount = 0;
     $('tileCount').value = 0;
     state.meta = null;
     setMessage('数量设为 0：此视频不生成预览图，仅保留封面；改回 1–30 可恢复', 'hint');
-    render();                                  // 本次事件的一次刷新
+    render();
   }
 
   var ticking = false;
@@ -496,66 +488,79 @@
     if (ticking) return;
     ticking = true;
     try {
-      // 只检测「选中项变化」；不读取尺寸、不刷新高度。
-      // 官方 7 个 event 里没有选中变化事件，这个 1s 轮询是必需的，且与高度无关。
       var item = await selectedItem();
       var id = item ? item.id : null;
       if (id === state.itemId) return;
 
       state.itemId = id;
-      syncBusy();                                    // 控件禁用状态跟随当前显示项
-      if (id && state.suppressed[id]) delete state.suppressed[id];  // 重新选择 -> 解除抑制
+      state.meta = null;
+      state.count = null;
+      state.autoMode = false;
+      hideCellMenu();
+      syncBusy();
+      if (id && state.suppressed[id]) delete state.suppressed[id];
 
       if (!id) {
-        state.meta = null;
+        syncControls();
         setMessage('请选中一个视频文件', 'hint');
         render();
         return;
       }
 
-      // 数量是单项配置：读这个视频自己的，不用上一次视频的值
+      var stat = Store.fileStat(item.filePath);
       var cfg = Store.getItemConfig(id);
-      state.lastCount = cfg.tileCount;
+      var cachedDuration = Store.readAnyDuration(id, stat);
+
+      if (!cfg.auto && cfg.tileCount === S.MIN_COUNT) {
+        state.count = 0; state.autoMode = false; state.lastCount = 0;
+        syncControls();
+        setMessage('此视频已设为 0 张，不生成预览图；把「数量」改为 1–30 可恢复', 'hint');
+        render();
+        return;
+      }
+
+      // 自动模式且已有缓存 → 立即算出张数；无缓存则显示「自动」，等 generate() 取时长
+      if (cfg.auto) {
+        state.autoMode = true;
+        state.count = cachedDuration ? S.autoCount(cachedDuration) : null;
+      } else {
+        state.autoMode = false;
+        state.count = cfg.tileCount;
+      }
+      if (state.count !== null) state.lastCount = state.count;
       syncControls();
 
-      // 该视频设为 0 张：即使「自动生成」开启也跳过，不读缓存、不抽帧。
-      if (cfg.tileCount === S.MIN_COUNT) {
-        state.meta = null;
-        setMessage('此视频已设为 0 张，不生成预览图；把「数量」改为 1–30 可恢复', 'hint');
-        render();          // 重新选择资源：一次刷新
-        return;
-      }
-
-      var spec = specOf(item, cfg.tileCount);
-      var disk = Store.readMeta(id);
-      if (Store.isCacheValid(disk, spec)) {
-        state.meta = disk;                       // 含已定失败帧的完整结果，直接复用
-        setMessage(describe(), 'hint');
-        render();          // 重新选择资源：一次刷新
-        return;
-      }
-
-      // 草稿：先显示已完成的帧，再（自动生成开启时）继续补抽缺口
-      if (Store.isResumable(disk, spec)) {
-        state.meta = disk;
-        setMessage(
-          describe() + (state.global.autoGenerate ? ' · 继续生成中' : ' · 点「生成」继续'),
-          'hint'
-        );
-        syncBusy();
-        render();
-        if (state.global.autoGenerate) await generate();
-        return;
+      if (state.count !== null && state.count !== S.MIN_COUNT) {
+        // 切换数量后若走缓存命中（不经过 generate），也要更新当前生效规格，
+        // 否则下次启动 pruneUnused 会按旧 activeCount 保留错的那套
+        try { Store.setActiveCount(id, state.count); } catch (e) { /* 不阻塞 */ }
+        var spec = specOf(item, state.count, stat);
+        var disk = Store.readMeta(id, state.count);
+        if (Store.isCacheValid(disk, spec)) {
+          state.meta = disk;
+          setMessage(describe(), 'hint');
+          render();
+          return;
+        }
+        if (Store.isResumable(disk, spec)) {
+          state.meta = disk;
+          setMessage(describe() + (state.global.autoGenerate ? ' · 继续生成中' : ' · 点「生成」继续'), 'hint');
+          syncBusy();
+          render();
+          if (state.global.autoGenerate) await generate();
+          return;
+        }
       }
 
       state.meta = null;
       if (state.global.autoGenerate) {
         await generate();
       } else {
-        setMessage('尚未生成预览图，点「生成」按钮自动生成', 'hint');
-        render();          // 重新选择资源：一次刷新
+        setMessage(state.count === null
+          ? '按时长自动决定张数，点「生成」开始'
+          : '尚未生成预览图，点「生成」按钮自动生成', 'hint');
+        render();
       }
-      // 注意：state.global.expanded 是全局的，切换视频不重置
     } catch (e) {
       state.meta = null;
       setMessage(friendlyError(e), 'error');
@@ -566,14 +571,25 @@
   }
 
   eagle.onPluginCreate(async function () {
-    // 先同步应用全局设置并解除首帧隐藏，再等异步主题。
-    // Eagle 在此回调时已保证 Plugin API 就绪，Store.getGlobal() 一定能读到
-    // settings.json；千万不要把这一步提前到脚本解析阶段（v1.3.1 的回归成因）。
+    // 全局设置必须在 onPluginCreate 内读取（Eagle 保证 API 就绪）。
+    // v1.3.1 曾把它提前到脚本解析阶段，导致静默回退默认值 —— 不要重演。
     try {
       state.global = Store.getGlobal();
     } catch (e) {
       setMessage(friendlyError(e), 'error');
     }
+
+    // 上次会话切换过数量 → 本次启动清理用不到的规格（用户拍板的可靠时机）
+    try {
+      if (Store.getPrunePending()) {
+        var pruned = Store.pruneUnused();
+        Store.clearPrunePending();
+        if (pruned.removed > 0 && window.console) {
+          console.log('[pv-grid] pruned ' + pruned.removed + ' obsolete cache specs');
+        }
+      }
+    } catch (e) { /* 清理失败不影响启动 */ }
+
     syncControls();
     var bootWrap = $('wrap');
     if (bootWrap) bootWrap.classList.remove('booting');
@@ -583,15 +599,9 @@
       document.body.setAttribute('theme', theme || 'LIGHT');
     } catch (e) { /* 主题取不到时用默认 */ }
 
-    // 固定基准只取一次；之后即使 iframe 尺寸变化也不重新取值
     state.baseViewport = window.innerHeight || DEFAULT_VIEWPORT;
     state.lastWidth = Math.round(window.innerWidth);
 
-    // 拖拽检查器分隔条时，鼠标松开发生在 Eagle 主窗口，插件 iframe 收不到 mouseup，
-    // 所以上一版只能靠「再点一下 iframe 内部」才刷新。改用 ResizeObserver 捕获
-    // 「布局宽度变化」这个可靠事件：只在宽度真的变化时同步刷新一次。
-    // 高度变化（我们自己写 grid 高度导致的）直接忽略，避免写入->事件->再写入的反馈循环。
-    // 无定时器、无防抖、无二次校准。
     if (typeof ResizeObserver === 'function') {
       var widthObserver = new ResizeObserver(function (entries) {
         var rect = entries && entries[0] && entries[0].contentRect;
@@ -606,22 +616,39 @@
     $('generate').addEventListener('click', generate);
     $('clear').addEventListener('click', clearPreview);
 
+    // 右键预览图 → 自绘下拉菜单（检查器环境比宿主 contextMenu 更稳、可单测）
+    $('grid').addEventListener('contextmenu', function (e) {
+      var cell = e.target;
+      while (cell && cell !== this && !(cell.classList && cell.classList.contains('cell'))) {
+        cell = cell.parentNode;
+      }
+      if (!cell || cell === this) return;
+      var index = Array.prototype.indexOf.call(this.children, cell);
+      if (index < 0 || !state.meta || !state.meta.results || state.meta.results[index] !== true) return;
+      e.preventDefault();
+      showCellMenu(e.clientX, e.clientY, index);
+    });
+    $('setCover').addEventListener('click', function (e) {
+      e.stopPropagation();
+      var i = state.menuIndex;
+      if (i !== null) setCover(i);
+    });
+    document.addEventListener('click', hideCellMenu);
+    window.addEventListener('blur', hideCellMenu);
+
     $('autoGenerate').addEventListener('change', function () {
       state.global.autoGenerate = !!this.checked;
       try { Store.setGlobal({ autoGenerate: state.global.autoGenerate }); } catch (e) { /* ignore */ }
       syncControls();
-      setMessage(
-        state.global.autoGenerate ? '自动生成已开启：选择视频时自动生成' : '自动生成已关闭',
-        'hint'
-      );
-      render();            // 开关切换：一次刷新
+      setMessage(state.global.autoGenerate ? '自动生成已开启：选择视频时自动生成' : '自动生成已关闭', 'hint');
+      render();
     });
 
     $('toggle').addEventListener('click', function () {
       state.global.expanded = !state.global.expanded;
       try { Store.setGlobal({ expanded: state.global.expanded }); } catch (e) { /* ignore */ }
       setMessage(describe(), 'hint');
-      render();            // 展开 / 收起：一次刷新
+      render();
     });
 
     $('tileCount').addEventListener('change', function () {
@@ -629,15 +656,13 @@
       this.value = n;
       state.lastCount = n;
       if (!state.itemId) return;
+      if (n === S.MIN_COUNT) { disableForItem(state.itemId); return; }
 
-      // 0 张统一走同一入口：不论「自动生成」开关状态，都立即清缓存并记住该设置，
-      // 绝不会因为开关开启而被 generate() 重新生成回来。
-      if (n === S.MIN_COUNT) {
-        disableForItem();
-        return;
-      }
-
-      try { Store.setItemConfig(state.itemId, { tileCount: n }); } catch (e) { /* ignore */ }
+      // 手动改数量 → 退出自动模式，按视频记住
+      try { Store.setItemConfig(state.itemId, { auto: false, tileCount: n }); } catch (e) { /* ignore */ }
+      state.count = n;
+      state.autoMode = false;
+      syncControls();
 
       if (state.global.autoGenerate && !state.suppressed[state.itemId]) {
         generate();
@@ -649,12 +674,10 @@
             : '数量已改为 ' + n + '，点「生成」重新生成',
           'hint'
         );
-        render();          // 数量确认：一次刷新
+        render();
       }
     });
 
-    // iframe 内部点击 / 松开的兜底：与 ResizeObserver 共用同一个宽度基准，
-    // 因此不会重复刷新；宽度没变就一次都不刷。
     window.addEventListener('mouseup', function () {
       var w = Math.round(window.innerWidth);
       if (w === state.lastWidth) return;
