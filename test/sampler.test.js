@@ -117,43 +117,47 @@ test('时间码格式化', function () {
   assert.strictEqual(S.formatTime(10.37), '00:10');
 });
 
-test('autoCount：10 档分桶边界（下界含、上界不含）', function () {
+test('autoCount：用户指定的 8 档分桶表（下界含、上界不含）', function () {
   var cases = [
-    [1, 3], [29.9, 3],
-    [30, 6], [59.9, 6],
-    [60, 9], [119.9, 9],
-    [120, 12], [299.9, 12],
-    [300, 15], [599.9, 15],
-    [600, 18], [1199.9, 18],
-    [1200, 21], [2399.9, 21],
-    [2400, 24], [3599.9, 24],
-    [3600, 27], [7199.9, 27],
-    [7200, 30], [99999, 30]
+    [1, 3], [59.9, 3],                 // < 1min -> 3
+    [60, 6], [119.9, 6],               // 1–2min -> 6
+    [120, 9], [299.9, 9],              // 2–5min -> 9
+    [300, 12], [599.9, 12],            // 5–10min -> 12
+    [600, 15], [1199.9, 15],           // 10–20min -> 15
+    [1200, 18], [2399.9, 18],          // 20–40min -> 18
+    [2400, 24], [3599.9, 24],          // 40–60min -> 24
+    [3600, 30], [7200, 30], [99999, 30] // >= 3600s -> 30
   ];
   cases.forEach(function (c) {
     assert.strictEqual(S.autoCount(c[0]), c[1], 'T=' + c[0]);
   });
 });
 
-test('autoCount：每档恰好 +3 张、边界全部凑整、末档 30', function () {
+test('autoCount：8 档、张数严格递增、边界全为凑整秒、末档 30', function () {
   var buckets = S.AUTO_BUCKETS;
-  assert.strictEqual(buckets.length, 10);
-  buckets.forEach(function (b, i) {
-    assert.strictEqual(b.count, 3 * (i + 1), 'bucket ' + i);
-  });
-  assert.strictEqual(buckets[0].count, 3);
-  assert.strictEqual(buckets[buckets.length - 1].count, 30);
+  assert.strictEqual(buckets.length, 8);
+  assert.deepStrictEqual(buckets.map(function (b) { return b.count; }),
+    [3, 6, 9, 12, 15, 18, 24, 30]);
   assert.deepStrictEqual(
     buckets.slice(0, -1).map(function (b) { return b.max; }),
-    [30, 60, 120, 300, 600, 1200, 2400, 3600, 7200]
+    [60, 120, 300, 600, 1200, 2400, 3600]
   );
+  assert.strictEqual(buckets[buckets.length - 1].max, Infinity);
+  for (var i = 1; i < buckets.length; i++) {
+    assert.ok(buckets[i].count > buckets[i - 1].count, 'bucket ' + i);
+    assert.ok(buckets[i].max > buckets[i - 1].max, 'bucket ' + i);
+  }
+  // 回归：新表不再满足「每档恰好 +3」，40min 之后跳档
+  assert.strictEqual(buckets[6].count - buckets[5].count, 6);
+  assert.strictEqual(buckets[7].count - buckets[6].count, 6);
 });
 
-test('autoCount：时长无效回退 9；30s 以下配合 plan 实际不超过 3 张', function () {
+test('autoCount：时长无效回退 9；< 1min 配合 plan 实际不超过 3 张', function () {
   assert.strictEqual(S.autoCount(0), 9);
   assert.strictEqual(S.autoCount(-5), 9);
   assert.strictEqual(S.autoCount(NaN), 9);
-  [5, 10, 20, 29].forEach(function (T) {
+  [5, 10, 20, 29, 59].forEach(function (T) {
+    assert.strictEqual(S.autoCount(T), 3, 'T=' + T);
     assert.ok(S.plan(T, S.autoCount(T)).actual <= 3, 'T=' + T);
   });
 });
