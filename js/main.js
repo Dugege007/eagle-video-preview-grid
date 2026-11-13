@@ -1,6 +1,11 @@
 /**
- * main.js — 检查器区块 UI 与生命周期 (v1.6.0)
+ * main.js — 检查器区块 UI 与生命周期 (v1.7.0)
  *
+ * v1.7.0：
+ *   - 右键菜单扩为三项「设为视频封面 / 复制 / 另存为」，三项统一基于
+ *     从视频该时间点重新抽出的**不缩放原尺寸帧**（192px 缩图太糊，不再用于封面）
+ *   - 复制优先写图片内容到系统剪贴板，检查器不支持时逐层兜底到复制文件；
+ *     另存为优先官方 showSaveDialog，不可用时退化为浏览器下载
  * v1.6.0：
  *   - 数量不再固定默认 9：未手动设置过的视频按 Sampler.autoCount(时长) 自动分桶；
  *     手动改数量 → auto=false 按视频记住；点「清空」→ 重置为 auto=true
@@ -193,7 +198,7 @@
           var img = document.createElement('img');
           img.className = 'thumb';
           img.alt = '';
-          img.title = S.formatTime(meta.times[i]) + '（右键设为封面）';
+          img.title = S.formatTime(meta.times[i]) + '（右键查看菜单）';
           if (i === visible - 1) img.addEventListener('load', refreshLayout, { once: true });
           try { img.src = Store.thumbDataURL(state.itemId, state.count, i); }
           catch (e) { img.classList.add('placeholder'); }
@@ -225,7 +230,7 @@
       repl = document.createElement('img');
       repl.className = 'thumb';
       repl.alt = '';
-      repl.title = S.formatTime(times[index]) + '（右键设为封面）';
+      repl.title = S.formatTime(times[index]) + '（右键查看菜单）';
       try { repl.src = Store.thumbDataURL(itemId, count, index); }
       catch (e) {
         repl = document.createElement('div');
@@ -245,7 +250,10 @@
     return items && items[0];
   }
 
-  /* ---------- 右键菜单 → 设为封面 ---------- */
+  /* ---------- 右键菜单 → 原尺寸帧 → 设为视频封面 / 复制 / 另存为 ---------- */
+
+  var MENU_WIDTH = 150;
+  var MENU_HEIGHT = 100;   // 三项 + 分隔线，用于把菜单收在视口内
 
   function hideCellMenu() {
     var m = $('cellMenu');
@@ -256,40 +264,159 @@
   function showCellMenu(x, y, index) {
     var m = $('cellMenu');
     if (!m) return;
-    m.style.left = Math.max(0, Math.min(x, window.innerWidth - 140)) + 'px';
-    m.style.top = Math.max(0, Math.min(y, window.innerHeight - 48)) + 'px';
+    m.style.left = Math.max(0, Math.min(x, window.innerWidth - MENU_WIDTH)) + 'px';
+    m.style.top = Math.max(0, Math.min(y, window.innerHeight - MENU_HEIGHT)) + 'px';
     m.hidden = false;
     state.menuIndex = index;
   }
 
-  async function setCover(index) {
+  /**
+   * 三个菜单项的统一入口：校验选中项与帧状态 → 从视频重新抽一张不缩放的原帧
+   * → 交给 action(framePath, item, time)。192px 缩图只用于网格显示，不再用于封面。
+   */
+  async function withFrame(index, label, action) {
     hideCellMenu();
     var meta = state.meta;
     if (!state.itemId || !meta || state.count === null) return;
     if (!meta.results || meta.results[index] !== true) {
-      setMessage('该帧未成功生成，无法设为封面', 'warn');
+      setMessage('该帧未成功生成，无法' + label, 'warn');
       render();
       return;
     }
     try {
       var item = await selectedItem();
       if (!item || item.id !== state.itemId) {
-        setMessage('请先选中该视频再设为封面', 'warn');
+        setMessage('请先选中该视频再' + label, 'warn');
         render();
         return;
       }
+      var t = meta.times[index];
+      setMessage('正在抽取 ' + S.formatTime(t) + ' 的原尺寸帧…', 'hint');
+      $('status').textContent = state.message;   // 只改文本，不触发 render / 高度刷新
+
+      var paths = await Capture.ensureFFmpeg();
+      Store.ensureFrameDir();
+      var frame = Store.frameFile(state.itemId);
+      await Capture.captureFrame(paths.ffmpeg, item.filePath, t, frame);
+      if (Store.fileStat(frame).size <= 0) throw new Error('FRAME_EMPTY');
+
+      await action(frame, item, t);
+    } catch (e) {
+      setMessage(label + '失败 · ' + friendlyError(e), 'error');
+      render();
+    }
+  }
+
+  async function setCover(index) {
+    await withFrame(index, '设为视频封面', async function (frame, item, t) {
       if (typeof item.setCustomThumbnail !== 'function') {
         throw new Error('当前 Eagle 版本不支持设置自定义封面');
       }
-      var src = Store.thumbPathFor(meta, state.itemId, state.count, index);
       // 先复制到持久 covers/，避免缓存清理影响已设置的封面
-      var cover = Store.copyToCover(state.itemId, src);
+      var cover = Store.copyToCover(state.itemId, frame);
       await item.setCustomThumbnail(cover);
-      setMessage('已将 ' + S.formatTime(meta.times[index]) + ' 设为封面', 'ok');
-    } catch (e) {
-      setMessage('设为封面失败：' + String((e && e.message) || e).slice(0, 120), 'error');
+      setMessage('已将 ' + S.formatTime(t) + ' 的原尺寸帧设为视频封面', 'ok');
+      render();
+    });
+  }
+
+  /** 官方示例直接写 nativeImage.createFromPath，说明宿主会注入；再兼容 require('electron')。 */
+  function nativeImageModule() {
+    if (window.nativeImage && typeof window.nativeImage.createFromPath === 'function') {
+      return window.nativeImage;
     }
-    render();
+    try {
+      if (typeof require === 'function') {
+        var el = require('electron');
+        if (el && el.nativeImage) return el.nativeImage;
+      }
+    } catch (e) { /* 落到下一层兜底 */ }
+    return null;
+  }
+
+  /**
+   * 复制图片内容，三层兜底（检查器 iframe 里哪些 API 可用官方未写明，逐层实测）：
+   *   1 eagle.clipboard.writeImage(NativeImage) —— 真·图片，可粘贴到聊天 / PS
+   *   2 navigator.clipboard.write(ClipboardItem) —— 浏览器异步剪贴板
+   *   3 eagle.clipboard.copyFiles([path]) —— 文件，可在资源管理器粘贴
+   * 返回 'image' / 'file'，调用方据此如实提示。
+   */
+  async function copyImageToClipboard(frame) {
+    var cb = eagle.clipboard;
+    var NI = nativeImageModule();
+    if (cb && NI && typeof cb.writeImage === 'function') {
+      try {
+        var img = NI.createFromPath(frame);
+        var ok = img && (typeof img.isEmpty !== 'function' || !img.isEmpty());
+        if (ok) { cb.writeImage(img); return 'image'; }
+      } catch (e) { /* 落到下一层 */ }
+    }
+    try {
+      if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+        var buf = require('fs').readFileSync(frame);
+        var blob = new Blob([new Uint8Array(buf)], { type: 'image/jpeg' });
+        await navigator.clipboard.write([new ClipboardItem({ 'image/jpeg': blob })]);
+        return 'image';
+      }
+    } catch (e) { /* 落到下一层 */ }
+    if (cb && typeof cb.copyFiles === 'function') {
+      cb.copyFiles([frame]);
+      return 'file';
+    }
+    throw new Error('CLIPBOARD_UNAVAILABLE');
+  }
+
+  async function copyFrame(index) {
+    await withFrame(index, '复制', async function (frame, item, t) {
+      var how = await copyImageToClipboard(frame);
+      setMessage(how === 'image'
+        ? '已复制 ' + S.formatTime(t) + ' 的原尺寸帧（图片）'
+        : '已复制该帧的图片文件，可在资源管理器粘贴；聊天框粘贴请用「另存为」',
+      'ok');
+      render();
+    });
+  }
+
+  function defaultFrameName(item, t) {
+    var base = String(item.name || 'video').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
+    return base + '_' + S.formatTime(t).replace(/:/g, '-') + '.jpg';
+  }
+
+  async function saveFrameTo(frame, name) {
+    if (eagle.dialog && typeof eagle.dialog.showSaveDialog === 'function') {
+      var r = null;
+      try {
+        r = await eagle.dialog.showSaveDialog({
+          title: '保存视频原尺寸帧',
+          defaultPath: name,
+          filters: [{ name: 'JPEG 图片', extensions: ['jpg'] }]
+        });
+      } catch (e) { r = null; }        // 检查器里对话框不可用 → 浏览器下载兜底
+      if (r && r.canceled) return 'canceled';
+      if (r && r.filePath) {
+        require('fs').copyFileSync(frame, r.filePath);
+        return 'saved';
+      }
+    }
+    // 兜底：<a download> 存到浏览器默认下载目录，不能选路径
+    var a = document.createElement('a');
+    a.href = Store.fileDataURL(frame);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return 'downloaded';
+  }
+
+  async function saveFrame(index) {
+    await withFrame(index, '另存为', async function (frame, item, t) {
+      var name = defaultFrameName(item, t);
+      var how = await saveFrameTo(frame, name);
+      if (how === 'canceled') setMessage('已取消另存为', 'hint');
+      else if (how === 'saved') setMessage('已保存 ' + name + '（原尺寸）', 'ok');
+      else setMessage('已通过浏览器下载保存 ' + name + '（原尺寸）', 'ok');
+      render();
+    });
   }
 
   /* ---------- 数量决策 ---------- */
@@ -628,10 +755,12 @@
       e.preventDefault();
       showCellMenu(e.clientX, e.clientY, index);
     });
-    $('setCover').addEventListener('click', function (e) {
-      e.stopPropagation();
-      var i = state.menuIndex;
-      if (i !== null) setCover(i);
+    [['setCover', setCover], ['copyFrame', copyFrame], ['saveFrame', saveFrame]].forEach(function (pair) {
+      $(pair[0]).addEventListener('click', function (e) {
+        e.stopPropagation();
+        var i = state.menuIndex;
+        if (i !== null) pair[1](i);
+      });
     });
     document.addEventListener('click', hideCellMenu);
     window.addEventListener('blur', hideCellMenu);

@@ -3,6 +3,31 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本。
 
+## [1.7.0] - 2026-11-13
+
+### 新增 · 右键菜单扩为三项，改用原尺寸帧
+
+- 用户反馈：192px 缩略图设为封面太糊，希望「设为视频封面」用视频中的这一帧（原始分辨率）；并把「复制 / 另存为」加回右键菜单。`git log -S` 核实插件历史上从未实现过这两项，推断指浏览器原生图片右键菜单被 v1.6.0 自绘菜单屏蔽（**推断，非事实**）。
+- **用户拍板两点**：三项统一用原尺寸帧；「复制」要图片内容（可粘贴到聊天 / PS），不是文件。
+- `capture.js` 新增 `buildFrameArgs()` / `captureFrame()`：与缩图同一套 `-ss` 前置精确 seek，但**不加任何 `-vf scale`**、`-q:v 2` 高质量 JPEG，保留视频原始分辨率。缩图仍是 `scale=192:-2` / `-q:v 3`，两套参数互不影响。
+- `main.js` 新增 `withFrame(index, label, action)`：校验选中项与帧状态 → 抽一张原帧 → 执行动作，三项共用。菜单文案严格为「设为视频封面 / 复制 / 另存为」，中间加分隔线，定位余量按三项高度调整。
+- **设为视频封面**：原帧复制到持久 `covers/<itemId>.jpg` 后调 `item.setCustomThumbnail()`，缓存清理不影响已设封面。
+- **复制**：三层兜底 —— ① `eagle.clipboard.writeImage(NativeImage)` 写图片内容；② `navigator.clipboard.write(ClipboardItem)`；③ `eagle.clipboard.copyFiles([path])` 复制文件。状态行如实区分「图片」与「图片文件」。
+- **另存为**：`eagle.dialog.showSaveDialog({defaultPath, filters})` 选路径后复制 JPEG；对话框不可用时退化为 `<a download>` 浏览器下载到默认目录。默认文件名 `视频名_MM-SS.jpg`。
+- `store.js` 新增 `frames/<itemId>.jpg`（固定文件名、每视频只留最近一张、不被 `pruneUnused` 清理）、`ensureFrameDir()`、`fileDataURL()`。
+- **未触碰**：缩图生成与多规格缓存、`RULE_VERSION`（仍 `v2`，升级零重抽）、`onPluginCreate` 内的全局设置读取、事件驱动高度逻辑、`multiSelect:false`，无新增定时器。
+
+### 依据与待实测
+
+- 依据（高可信 · 官方）：[clipboard](https://developer.eagle.cool/plugin-api/zh-cn/api/clipboard)（`writeImage` / `copyFiles`）、[dialog](https://developer.eagle.cool/plugin-api/zh-cn/api/dialog)（`showSaveDialog` 返回 `{canceled, filePath}`）、[item](https://developer.eagle.cool/plugin-api/zh-cn/api/item)（`setCustomThumbnail(thumbnailPath)`）。
+- **待实测 / 官方未写明**：检查器 iframe 里 `eagle.clipboard` 与 `eagle.dialog` 是否可用、`nativeImage` 全局是否注入、Chromium 107 是否接受 `image/jpeg` 的 `ClipboardItem`、`setCustomThumbnail` 是否接受大尺寸 JPEG。均已做多层兜底，但不保证与浏览器原生菜单完全一致。
+- 每次点击菜单都会重新抽一帧原图，比直接用缩略图慢；另存为的文件体积也明显大于缩图。
+
+### 验证
+
+- 新增 `test/menu.test.js` **6 组**静态契约（三项文案与顺序、绑定、封面不再用缩略图、复制与另存为兜底齐备、`frameFile` / `fileDataURL`）；`capture.test.js` 扩到 **10 组**（原帧不缩放、`-q:v 2`、缩图参数回归）。
+- `npm test` **51/51**（采样 15 + 布局 9 + 抽帧 10 + 缓存 11 + 菜单 6）；JS 语法、JSON 全过。
+
 ## [1.6.1] - 2026-11-13
 
 ### 变更 · 时长自动分桶表（按用户指定）

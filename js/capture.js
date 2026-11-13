@@ -31,6 +31,23 @@
     ];
   }
 
+  /**
+   * 原尺寸帧参数（v1.7.0）：故意不加任何 -vf scale，保留视频原始分辨率。
+   * 用于右键菜单的「设为视频封面 / 复制 / 另存为」——192px 缩略图做封面太糊。
+   * -q:v 2 是高质量 JPEG（FFmpeg 的 mjpeg 质量标度，越小越好），比缩图的 3 更清晰。
+   */
+  function buildFrameArgs(filePath, t, outPath) {
+    return [
+      '-y',
+      '-accurate_seek',
+      '-ss', String(t),
+      '-i', filePath,
+      '-frames:v', '1',
+      '-q:v', '2',
+      outPath
+    ];
+  }
+
   function childProcess() {
     if (typeof require !== 'function') throw new Error('NODE_UNAVAILABLE');
     return require('child_process');
@@ -112,6 +129,11 @@
     await run(ffmpeg, buildCaptureArgs(filePath, t, outPath), 60000);
   }
 
+  /** 抽一张不缩放的原帧；输出是否落盘由调用方检查（便于单测注入 runner）。 */
+  async function captureFrame(ffmpeg, filePath, t, outPath) {
+    await run(ffmpeg, buildFrameArgs(filePath, t, outPath), 60000);
+  }
+
   /**
    * opts.skip[i]     = 已决帧（成功或已定失败）→ 直接跳过，不重抽
    * opts.onFrame(i,ok)= 每完成一帧回调，供调用方逐帧落盘
@@ -162,9 +184,11 @@
     MAX_CONCURRENCY: MAX_CONCURRENCY,
     THUMB_WIDTH: THUMB_WIDTH,
     buildCaptureArgs: buildCaptureArgs,
+    buildFrameArgs: buildFrameArgs,
     ensureFFmpeg: ensureFFmpeg,
     probeDuration: probeDuration,
     captureOne: captureOne,
+    captureFrame: captureFrame,
     captureAll: captureAll
   };
 

@@ -48,6 +48,32 @@ test('并发上限仍为 2', function () {
   assert.strictEqual(C.MAX_CONCURRENCY, 2);
 });
 
+test('v1.7.0 原帧：不含 scale / -vf，保留视频原始分辨率', function () {
+  var args = C.buildFrameArgs('V.mp4', 12.5, 'frame.jpg');
+  assert.strictEqual(args.indexOf('-vf'), -1);
+  assert.ok(args.join(' ').indexOf('scale=') === -1, '原帧不能被缩放');
+});
+
+test('v1.7.0 原帧：-q:v 2 高质量、单点、精确 seek、路径原样', function () {
+  var src = 'D:\\素材\\我的 视频.mp4';
+  var out = 'D:\\缓存\\frame.jpg';
+  var args = C.buildFrameArgs(src, 10.37, out);
+  assert.strictEqual(args[args.indexOf('-q:v') + 1], '2');
+  assert.strictEqual(args[args.indexOf('-frames:v') + 1], '1');
+  assert.ok(args.indexOf('-accurate_seek') < args.indexOf('-i'));
+  assert.ok(args.indexOf('-ss') < args.indexOf('-i'));
+  assert.strictEqual(args[args.indexOf('-ss') + 1], '10.37');
+  assert.strictEqual(args[args.indexOf('-i') + 1], src);
+  assert.strictEqual(args[args.length - 1], out);
+});
+
+test('回归：缩图仍是 192px / -q:v 3，两套参数互不污染', function () {
+  var thumb = C.buildCaptureArgs('V.mp4', 3, '0.jpg');
+  assert.ok(thumb.join(' ').indexOf('scale=192:-2') >= 0);
+  assert.strictEqual(thumb[thumb.indexOf('-q:v') + 1], '3');
+  assert.strictEqual(typeof C.captureFrame, 'function');
+});
+
 test('skip 跳过已决帧、只抽 pending；onFrame 逐帧回调；进度是真实完成数', async function () {
   var called = [];
   var frames = [];

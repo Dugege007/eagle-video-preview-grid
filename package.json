@@ -1,10 +1,10 @@
 {
   "name": "eagle-video-preview-grid",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "private": true,
   "description": "Eagle 检查器插件：一键自动生成视频静态预览图网格",
   "scripts": {
-    "test": "node test/sampler.test.js && node test/layout.test.js && node test/capture.test.js && node test/cache.test.js",
+    "test": "node test/sampler.test.js && node test/layout.test.js && node test/capture.test.js && node test/cache.test.js && node test/menu.test.js",
     "logo": "python tools/make_logo.py"
   },
   "license": "MIT"

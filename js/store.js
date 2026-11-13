@@ -5,6 +5,7 @@
  *   thumbs/<itemId>/config.json               单个视频：auto / tileCount / activeCount
  *   thumbs/<itemId>/n<count>/meta.json + jpg  按数量分规格的派生缓存（v1.6.0）
  *   covers/<itemId>.jpg                      设为封面用的持久副本（不随缓存清理删除）
+ *   frames/<itemId>.jpg                      右键操作临时抽出的原尺寸帧（固定文件名、每视频一张）
  *
  * v1.5.0 的旧缓存是平铺的 `meta.json` + `<index>.jpg`，一律视为 count=9 兼容读取，
  * **不迁移文件、不升 RULE_VERSION**，升级后旧视频直接命中、零重抽。
@@ -344,6 +345,20 @@
     return { removed: removed };
   }
 
+  /* ---------- 右键菜单用的原尺寸帧 ---------- */
+
+  /** 固定文件名：每个视频只留最近抽出的一张原帧，不随操作次数累积。 */
+  function frameFile(itemId) {
+    return node().path.join(root(), 'frames', safeId(itemId) + '.jpg');
+  }
+
+  function ensureFrameDir() { ensureDir(node().path.join(root(), 'frames')); }
+
+  /** 任意本地 JPEG -> data URL，供 <a download> 兜底另存为使用。 */
+  function fileDataURL(filePath) {
+    return 'data:image/jpeg;base64,' + node().fs.readFileSync(filePath).toString('base64');
+  }
+
   /* ---------- 设为封面用的持久副本 ---------- */
 
   function coverFile(itemId) {
@@ -396,7 +411,10 @@
     clearItem: clearItem,
     pruneUnused: pruneUnused,
     coverFile: coverFile,
-    copyToCover: copyToCover
+    copyToCover: copyToCover,
+    frameFile: frameFile,
+    ensureFrameDir: ensureFrameDir,
+    fileDataURL: fileDataURL
   };
 
   global.Store = api;
