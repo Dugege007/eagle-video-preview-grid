@@ -1,6 +1,6 @@
 {
   "id": "a7e3c2f0-4b18-4d6a-9e52-6c1b8f30d947",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "platform": "all",
   "arch": "all",
   "name": "视频预览图",
@@ -9,7 +9,7 @@
   "devTools": false,
   "dependencies": ["ffmpeg"],
   "preview": {
-    "mp4,mov,m4v,webm,mkv,avi,flv,wmv": {
+    "mp4,mov,m4v,webm,mkv,avi,flv,wmv,ts,mts,m2ts,f4v,3gp": {
       "inspector": {
         "path": "index.html",
         "height": 320,

@@ -2,7 +2,7 @@
 
 在 Eagle 检查器里，把视频按等距时间点抽成**静态预览图网格**，一眼扫完这个视频的大致内容。
 
-支持 mp4 / mov / m4v / webm / mkv / avi / flv / wmv。开源地址：https://github.com/Dugege007/eagle-video-preview-grid
+支持 mp4 / mov / m4v / webm / mkv / avi / flv / wmv / ts / mts / m2ts / f4v / 3gp。开源地址：https://github.com/Dugege007/eagle-video-preview-grid
 
 ## 一、插件功能
 
@@ -80,6 +80,8 @@ t_i = T - M·gap + (i - 1)·gap      (i = 1 … M)
 ## 五、注意事项
 
 - **依赖 FFmpeg 插件**：未安装时无法取时长与抽帧。
+- **支持格式可扩展**：检查器区块对哪些格式显示，只由 `manifest.json` 的 `preview` 扩展名列表决定；以后遇到生成不了的格式，确认 Eagle 与 FFmpeg 都能处理后，把扩展名加进这个列表即可，采样与缓存逻辑无需改动。
+- **TS / MTS / M2TS 注意**：这类容器没有索引，个别录制流可能读不到时长、或某些时间点抽帧失败；失败的点会显示「抽帧失败」占位卡片并连同成功项一起缓存，不会反复重抽。
 - **设为视频封面会写入资源库**：这是本插件唯一会改动素材的操作（调用官方 `item.setCustomThumbnail`）。原帧会先复制一份到 `covers/`，清理缓存不影响已设置的封面。除此之外预览图仍是派生缓存，不写 `metadata.json`、不随 Eaglepack 迁移。
 - **右键三项都基于原尺寸帧**：每次点击都会重新抽一帧（不缩放、`-q:v 2` 高质量 JPEG），比直接用缩略图慢一些，另存为的文件也大得多。原帧临时放在 `frames/<itemId>.jpg`，每个视频只保留最近一张。
 - **复制 / 另存为的兼容兜底**：优先用 Eagle 官方 `clipboard.writeImage` 写图片内容、`dialog.showSaveDialog` 选保存路径；若检查器环境不支持，复制退化为复制图片文件（可在资源管理器粘贴，聊天框通常不出图）、另存为退化为浏览器下载到默认目录，状态行会如实提示实际用了哪种方式。

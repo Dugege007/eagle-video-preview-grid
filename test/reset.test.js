@@ -69,8 +69,9 @@ test('「清空」语义不变：仍删所有规格并抑制自动生成', funct
 
 test('事件绑定与版本一致', function () {
   assert.ok(main.indexOf("$('reset').addEventListener('click', resetCount)") >= 0);
-  assert.strictEqual(manifest.version, '1.8.0');
-  assert.strictEqual(pkg.version, '1.8.0');
+  // 不断言具体版本号：每次升级都要改测试没有意义，只保证两处版本一致且格式合法
+  assert.ok(/^\d+\.\d+\.\d+$/.test(manifest.version));
+  assert.strictEqual(pkg.version, manifest.version);
   assert.ok(pkg.scripts.test.indexOf('test/reset.test.js') >= 0);
 });
 

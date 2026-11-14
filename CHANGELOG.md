@@ -3,6 +3,23 @@
 本文件记录所有值得注意的变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号遵循语义化版本。
 
+## [1.9.0] - 2026-11-14
+
+### 新增 · 支持 TS 系列与其余官方视频格式
+
+- 用户确认「都加上吧，后续如果遇到其他没法生成缩略图的格式再加其他的」：在既有 8 种之外追加 `ts` / `mts` / `m2ts` / `f4v` / `3gp`，`preview` 键共 **13 种**；保留现有 `avi` / `wmv`（用户未要求删除）。
+- **唯一运行时改动是 `manifest.json` 的一行**：`js/` 下所有模块逐行核对，没有任何按 `ext` 过滤的逻辑，取时长与抽帧都直接使用 `item.filePath`。采样 / 抽帧 / 缓存 / 右键菜单 / 全局设置逻辑一行未动；`RULE_VERSION` 保持 `v2`，已有视频零重抽。
+- 依据（高可信 · 官方）：[检查器插件文档](https://developer.eagle.cool/plugin-api/zh-cn/get-started/plugin-types/inspector) 的 `preview` 是逗号分隔扩展名列表；[Eagle 支持格式页](https://eagle.cool/support/article/what-file-formats-does-eagle-support) 与 [Build18 博客](https://tw.eagle.cool/blog/post/eagle4-build18)、[TS 帮助页](https://tw.eagle.cool/support/article/why-cant-ts-video-format-be-previewed-in-eagle) 确认 Eagle 4.0 Build18+ 原生支持 TS / MTS / M2TS / F4V / 3GP，本插件要求 build22+ 故满足。
+- 上一轮本机实测（设计文档 §33）：FFmpeg 9.0.1 + 项目 `capture.js`，规范 TS 与 PTS 偏移 TS 的 `probeDuration=60`、`-ss 5/20/45` 全部抽帧成功（110–135ms）；截断 TS 按缩短时长出图、不越界。
+- **负向结论 / 待实测**：真实广播或录制 TS 可能 `duration=N/A`、时间戳回绕、多节目 / 加扰、无 PCR（二手资料 + 推断，未实测）→ 会提示「无法读取该视频时长」或个别帧失败；v1.5.0 的部分失败缓存与占位卡片可兜底。彻底解决需给 `probeDuration` 加 `-probesize` / `-analyzeduration` 或按 PCR 估算时长，本版不做。
+- README 支持格式列表与注意事项（「以后加格式改 `preview` 键」、TS 风险）；商店文案 / 审核说明（含 TS 可复现步骤）/ 检查清单 / 视觉素材说明同步 1.9.0。
+
+### 验证
+
+- 新增 `test/formats.test.js` **6 组**静态契约：13 种集合与顺序、新增 5 种齐备、键格式无空格 / 重复 / 大写、`inspector` 结构未变、README 列表同步、版本与测试脚本。
+- 顺带把 `reset.test.js` / `formats.test.js` 里写死的版本号断言改成「`manifest` 与 `package` 版本一致且格式合法」，以后升版本不必再改测试。
+- `npm test` **63/63**（采样 15 + 布局 9 + 抽帧 10 + 缓存 11 + 菜单 6 + 重置 6 + 格式 6）；JS 语法、JSON 全过。
+
 ## [1.8.0] - 2026-11-13
 
 ### 新增 · 橙色「重置」按钮
